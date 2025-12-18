@@ -367,7 +367,7 @@ export default function PdfCompressorTool() {
         
         // 🟢 FIX START: Webpack Asset Module Pattern (Derived from PdfToImagesTool)
         // 1. Import from 'pdfjs-dist/build/pdf' explicitly
-        const pdfjsModule = await import("pdfjs-dist/build/pdf");
+        const pdfjsModule = await import("pdfjs-dist/build/pdf.mjs");
         const pdfjs = (pdfjsModule.default || pdfjsModule) as any;
 
         // 2. Configure Worker using 'new URL' + 'import.meta.url' + '.js' extension
