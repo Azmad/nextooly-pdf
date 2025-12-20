@@ -1,3 +1,13 @@
+import type { Metadata } from "next";
+export const metadata: Metadata = {
+  title: "Protect PDF",
+  description:
+    "Protect PDF files with a password using Nextooly. Encrypt PDFs locally in your browser with 100% client-side processing.",
+  alternates: {
+    canonical: "/protect-pdf",
+  },
+};
+
 import React from "react";
 import PdfProtectTool from "@/components/tools/PdfProtectTool";
 import { MoreToolsSection } from "@/components/tools/StaticContent";

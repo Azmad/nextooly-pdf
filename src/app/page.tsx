@@ -1,3 +1,13 @@
+import type { Metadata } from "next";
+export const metadata: Metadata = {
+  title: "PDF Compressor",
+  description:
+    "Compress PDF files online for free with Nextooly. Reduce PDF size directly in your browser with 100% client-side processing.",
+  alternates: {
+    canonical: "/",
+  },
+};
+
 import React from "react";
 import ExternalBreadcrumb from '../components/tools/ExternalBreadcrumb';
 import PdfCompressorTool from "@/components/tools/PdfCompressorTool";

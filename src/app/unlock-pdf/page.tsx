@@ -1,13 +1,20 @@
+
 import React from "react";
 import PdfUnlockTool from "@/components/tools/PdfUnlockTool";
 import { MoreToolsSection } from "@/components/tools/StaticContent";
 import NextoolyToolPageShell from "@/components/tools/NextoolyToolPageShell";
 import { HowToGridSection, FaqListSection } from "@/components/tools/NextoolyContentBlocks";
 
-export const metadata = {
-  title: "Unlock PDF - Nextooly",
-  description: "Remove passwords from PDF files securely in your browser.",
+import type { Metadata } from "next";
+export const metadata: Metadata = {
+  title: "Unlock PDF",
+  description:
+    "Unlock password-protected PDF files using Nextooly. Remove PDF passwords locally in your browser with 100% client-side processing.",
+  alternates: {
+    canonical: "/unlock-pdf",
+  },
 };
+
 
 export default function UnlockPdfPage() {
   return (

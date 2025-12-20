@@ -4,37 +4,40 @@ import "./globals.css";
 import Header from "../components/layout/Header";
 
 const inter = Inter({ subsets: ["latin"] });
-const SITE_URL = "https://nextooly.com"; 
+const SITE_URL = "https://pdf.nextooly.com";
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
+  alternates: {
+    canonical: "/",
+  },
   title: {
-    default: "Nextooly — Fast, Secure & Free Online Tools",
+    default: "Nextooly PDF Tools — Compress, Protect & Unlock PDFs",
     template: "%s | Nextooly",
   },
   applicationName: "Nextooly",
-  description:
-    "Use 90+ fast, secure, browser-based tools for PDFs, images, text, data, security, and more. 100% client-side, no uploads, no signup.",
+  description:"Free PDF tools by Nextooly. Compress, protect, and unlock PDFs directly in your browser. 100% client-side, no uploads.",
   keywords: [
-    "nextooly",
-    "online tools",
-    "pdf tools",
-    "image tools",
-    "text tools",
-    "developer tools",
-    "browser tools",
-    "free utilities",
-    "client-side tools",
-  ],
+  "nextooly",
+  "pdf tools",
+  "pdf compressor",
+  "compress pdf",
+  "protect pdf",
+  "encrypt pdf",
+  "unlock pdf",
+  "remove pdf password",
+  "client-side pdf",
+  "browser pdf tools",
+],
+
   icons: {
     icon: "/favicon.ico", 
     shortcut: "/favicon.ico",
     apple: "/favicon.ico",
   },
   openGraph: {
-    title: "Nextooly — Fast, Secure & Free Online Tools",
-    description:
-      "Use 90+ fast, secure, browser-based tools for PDFs, images, text, data, security, and more. Everything runs in your browser — no uploads, no signup.",
+    title: "Nextooly PDF Tools — Compress, Protect & Unlock PDFs",
+    description:"Compress, protect, and unlock PDFs directly in your browser. 100% client-side processing, no uploads.",
     url: SITE_URL,
     siteName: "Nextooly",
     type: "website",
@@ -50,8 +53,8 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "Nextooly — Fast, Secure & Free Online Tools",
-    description: "Free, fast, and secure browser-based tools...",
+    title: "Nextooly PDF Tools — Compress, Protect & Unlock PDFs",
+    description: "Free PDF tools by Nextooly. 100% client-side, no uploads.",
     images: [`${SITE_URL}/main-logo.png`], 
   },
 };
