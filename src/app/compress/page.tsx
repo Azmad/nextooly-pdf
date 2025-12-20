@@ -4,7 +4,7 @@ export const metadata: Metadata = {
   description:
     "Compress PDF files online for free. Reduce PDF size without losing quality. 100% secure, browser-based PDF compressor by Nextooly.",
   alternates: {
-    canonical: "/",
+    canonical: "https://pdf.nextooly.com/compress",
   },
 };
 

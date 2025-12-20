@@ -4,7 +4,7 @@ export const metadata: Metadata = {
   description:
     "Protect PDF files with a password online. Encrypt PDFs securely in your browser. No uploads, no tracking, 100% private with Nextooly.",
   alternates: {
-    canonical: "/protect-pdf",
+    canonical: "https://pdf.nextooly.com/protect-pdf",
   },
 };
 

@@ -3,7 +3,7 @@ import { Inter } from "next/font/google";
 import "./globals.css";
 import Header from "../components/layout/Header";
 
-const inter = Inter({ subsets: ["latin"] });
+const inter = Inter({ subsets: ["latin"], display: "swap" });
 const SITE_URL = "https://pdf.nextooly.com";
 
 export const metadata: Metadata = {

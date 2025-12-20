@@ -11,7 +11,7 @@ export const metadata: Metadata = {
   description:
     "Unlock password-protected PDFs online. Remove PDF passwords securely in your browser with no uploads. Fast, private, and free by Nextooly.",
   alternates: {
-    canonical: "/unlock-pdf",
+    canonical: "https://pdf.nextooly.com/unlock-pdf",
   },
 };
 

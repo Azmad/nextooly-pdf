@@ -50,9 +50,10 @@ export default function Header() {
              <Image
               src="/main-logo.png"
               alt="Nextooly Logo"
-              width={40}
+              width={120}
               height={40}
-              style={{ objectFit: "contain" }}
+              // style={{ objectFit: "contain" }}
+              fetchPriority="high"
               priority
             />
           </div>
