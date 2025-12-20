@@ -1,3 +1,23 @@
+/*
+ * Nextooly – Online PDF Tools
+ * Copyright (C) 2025 Nextooly
+ *
+ * This file is part of the Nextooly PDF Tools project.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 "use client";
 
 import React, {
@@ -5,10 +25,15 @@ import React, {
   useRef,
   useEffect
 } from "react";
+import { 
+  compressWithMuPDF, 
+  CompressionLevel,
+  PasswordProtectedError,
+  PdfServiceError
+} from "@/lib/mupdf/service";
+import FileDropzone from "./FileDropzone";
 
 // --- Types ---
-type CompressionLevel = "lossless" | "balanced" | "strong";
-
 type ProgressState = {
   status: string;
   percent: number;
@@ -21,7 +46,7 @@ type Action =
   | { type: "SET_LEVEL"; payload: CompressionLevel }
   | { type: "START_PROCESSING" }
   | { type: "UPDATE_PROGRESS"; payload: ProgressState }
-  | { type: "COMPLETE"; payload: { url: string; size: number } }
+  | { type: "COMPLETE"; payload: { url: string; size: number; isOptimized: boolean } }
   | { type: "ERROR"; payload: string }
   | { type: "CANCEL" };
 
@@ -32,6 +57,7 @@ type State = {
   progress: ProgressState | null;
   outputUrl: string | null;
   outputSize: number | null;
+  isAlreadyOptimized: boolean; 
   error: string | null;
 };
 
@@ -40,7 +66,7 @@ const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 const ALLOWED_MIME = "application/pdf";
 const MAGIC_BYTES = "%PDF-";
 
-// --- Icons ---
+// --- Icons (Kept intact) ---
 const Icons = {
   Upload: () => (
     <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -84,10 +110,15 @@ const Icons = {
       <line x1="18" y1="6" x2="6" y2="18" />
       <line x1="6" y1="6" x2="18" y2="18" />
     </svg>
+  ),
+  Check: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
   )
 };
 
-// --- Styles ---
+// --- Styles (Kept intact) ---
 const STYLES = `
   .tool-container {
     font-family: 'Inter', system-ui, -apple-system, sans-serif;
@@ -101,29 +132,6 @@ const STYLES = `
     position: relative;
     max-width: 600px;
   }
-  .dropzone {
-    border: 2px dashed #e5e7eb;
-    border-radius: 1rem;
-    padding: 3rem 2rem;
-    text-align: center;
-    transition: all 0.2s ease;
-    background: #f9fafb;
-    cursor: pointer;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 1rem;
-    color: #9ca3af;
-    margin: 1.5rem;
-  }
-  .dropzone:hover:not(.disabled) {
-    border-color: #3b82f6;
-    background: #eff6ff;
-    color: #2563eb;
-  }
-  .dropzone.disabled { opacity: 0.5; cursor: not-allowed; }
-  .drop-icon { transition: transform 0.2s; }
-  .dropzone:hover .drop-icon { transform: translateY(-4px); }
   .controls-area {
     padding: 1.5rem;
     background: #ffffff;
@@ -214,6 +222,15 @@ const STYLES = `
     margin-bottom: 1.5rem;
     text-align: center;
   }
+  .info-card {
+    background: #eff6ff;
+    border: 1px solid #dbeafe;
+    color: #1e40af;
+    padding: 1rem;
+    border-radius: 0.5rem;
+    margin-bottom: 1.5rem;
+    text-align: center;
+  }
   .error-box {
     background: #fef2f2;
     border: 1px solid #fecaca;
@@ -229,7 +246,7 @@ const STYLES = `
   .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }
 `;
 
-// --- Utils ---
+// --- Utils (Kept intact) ---
 const formatSize = (bytes: number): string => {
   if (bytes === 0) return "0 B";
   const k = 1024;
@@ -243,12 +260,12 @@ const validateFile = async (file: File): Promise<string | null> => {
   if (file.size > MAX_FILE_SIZE) return `File too large (Max ${MAX_FILE_SIZE / 1024 / 1024}MB).`;
   if (file.type !== ALLOWED_MIME) return "Invalid file type. Please upload a PDF.";
 
-  // Magic Bytes Check (First 5 bytes for %PDF-)
+  // Magic Bytes Check
   try {
     const slice = file.slice(0, 5);
     const text = await slice.text();
     if (!text.startsWith(MAGIC_BYTES)) {
-      return "Invalid PDF file structure (missing magic bytes).";
+      return "Invalid PDF file structure.";
     }
   } catch (e) {
     return "Failed to read file.";
@@ -256,7 +273,7 @@ const validateFile = async (file: File): Promise<string | null> => {
   return null;
 };
 
-// --- Reducer ---
+// --- Reducer (Kept intact) ---
 const initialState: State = {
   status: "idle",
   file: null,
@@ -264,6 +281,7 @@ const initialState: State = {
   progress: null,
   outputUrl: null,
   outputSize: null,
+  isAlreadyOptimized: false,
   error: null,
 };
 
@@ -276,11 +294,18 @@ function reducer(state: State, action: Action): State {
     case "SET_LEVEL":
       return { ...state, level: action.payload };
     case "START_PROCESSING":
-      return { ...state, status: "processing", error: null, progress: { status: "Initializing...", percent: 0 } };
+      return { ...state, status: "processing", error: null, isAlreadyOptimized: false, progress: { status: "Initializing...", percent: 0 } };
     case "UPDATE_PROGRESS":
       return { ...state, progress: action.payload };
     case "COMPLETE":
-      return { ...state, status: "success", outputUrl: action.payload.url, outputSize: action.payload.size, progress: null };
+      return { 
+        ...state, 
+        status: "success", 
+        outputUrl: action.payload.url, 
+        outputSize: action.payload.size, 
+        isAlreadyOptimized: action.payload.isOptimized,
+        progress: null 
+      };
     case "ERROR":
       return { ...state, status: "error", error: action.payload, progress: null };
     case "CANCEL":
@@ -294,25 +319,23 @@ function reducer(state: State, action: Action): State {
 export default function PdfCompressorTool() {
   const [state, dispatch] = useReducer(reducer, initialState);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
 
-  // Cleanup effect for Object URLs
   useEffect(() => {
     return () => {
       if (state.outputUrl) {
         URL.revokeObjectURL(state.outputUrl);
       }
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-      }
     };
   }, [state.outputUrl]);
 
-  const handleFileSelect = async (files: FileList | null) => {
+  // --- UPDATED HANDLER ---
+  // Adjusted to handle both single File (from Dropzone) and FileList (from old input)
+  const handleFileSelect = async (files: FileList | File[] | null) => {
     if (!files || files.length === 0) return;
-    const file = files[0];
     
-    // Validate
+    // Normalize to single file
+    const file = files instanceof FileList ? files[0] : files[0];
+    
     const error = await validateFile(file);
     if (error) {
       dispatch({ type: "ERROR", payload: error });
@@ -320,177 +343,57 @@ export default function PdfCompressorTool() {
     }
 
     dispatch({ type: "SET_FILE", payload: file });
-    // Reset file input value so same file can be selected again if needed
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   const handleCompress = async () => {
     if (!state.file) return;
-
-    // cleanup previous operations
     if (state.outputUrl) URL.revokeObjectURL(state.outputUrl);
-    if (abortControllerRef.current) abortControllerRef.current.abort();
-
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-    const signal = controller.signal;
 
     dispatch({ type: "START_PROCESSING" });
 
     try {
-      // --- Dynamic Imports ---
-      // We import strictly when needed to keep bundle small
-      const { PDFDocument } = await import("pdf-lib");
+      dispatch({ type: "UPDATE_PROGRESS", payload: { status: "Initializing engine...", percent: 10 } });
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      dispatch({ type: "UPDATE_PROGRESS", payload: { status: "Compressing PDF (WASM)...", percent: 40 } });
       
-      if (signal.aborted) throw new Error("Aborted");
+      // CALLS THE WORKING SERVICE (Preserved)
+      const resultBytes = await compressWithMuPDF(
+        state.file, 
+        state.level as CompressionLevel
+      );
 
-      const arrayBuffer = await state.file.arrayBuffer();
-      if (signal.aborted) throw new Error("Aborted");
+      const isOptimized = resultBytes.length < state.file.size;
 
-      dispatch({ type: "UPDATE_PROGRESS", payload: { status: "Loading PDF...", percent: 10 } });
+      dispatch({ type: "UPDATE_PROGRESS", payload: { status: "Preparing download...", percent: 95 } });
+      
+      const safeBytes = new Uint8Array(resultBytes.byteLength);
+      safeBytes.set(resultBytes);
 
-      let resultBytes: Uint8Array;
-
-      // --- LOGIC BRANCHING ---
-
-      if (state.level === "lossless") {
-        // --- Strategy 1: Repack with Object Streams (Lossless) ---
-        const pdfDoc = await PDFDocument.load(arrayBuffer);
-        
-        dispatch({ type: "UPDATE_PROGRESS", payload: { status: "Optimizing streams...", percent: 50 } });
-        
-        // Saving with useObjectStreams=true often reduces size for PDFs that didn't use it before
-        resultBytes = await pdfDoc.save({ useObjectStreams: true });
-
-      } else {
-        // --- Strategy 2: Rasterization (Lossy - Balanced/Strong) ---
-        
-        // 🟢 FIX START: Webpack Asset Module Pattern (Derived from PdfToImagesTool)
-        // 1. Import from 'pdfjs-dist/build/pdf' explicitly
-        const pdfjsModule = await import("pdfjs-dist/build/pdf.mjs");
-        const pdfjs = (pdfjsModule.default || pdfjsModule) as any;
-
-        // 2. Configure Worker using 'new URL' + 'import.meta.url' + '.js' extension
-        // This forces Webpack to bundle the worker file locally.
-       pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.mjs";
-
-        // 🟢 FIX END
-
-        const loadingTask = pdfjs.getDocument({
-          data: new Uint8Array(arrayBuffer),
-          disableRange: true,
-          disableStream: true,
-        });
-
-        const pdf = await loadingTask.promise;
-        const totalPages = pdf.numPages;
-        const newPdf = await PDFDocument.create();
-
-        // Canvas for rendering
-        const canvas = document.createElement("canvas");
-        const ctx = canvas.getContext("2d", { willReadFrequently: true });
-        
-        if (!ctx) throw new Error("Canvas context unavailable");
-
-        // Scale/Quality Settings
-        // Balanced: 1.0 scale, 0.7 quality
-        // Strong: 0.6 scale, 0.5 quality
-        const scale = state.level === "balanced" ? 1.0 : 0.6;
-        const quality = state.level === "balanced" ? 0.7 : 0.5;
-
-        for (let i = 1; i <= totalPages; i++) {
-          if (signal.aborted) throw new Error("Aborted");
-
-          dispatch({ 
-            type: "UPDATE_PROGRESS", 
-            payload: { 
-              status: `Processing page ${i} of ${totalPages}...`, 
-              percent: 20 + Math.floor((i / totalPages) * 60) 
-            } 
-          });
-
-          // Yield to main thread to allow UI updates and abortion
-          await new Promise(resolve => setTimeout(resolve, 0));
-
-          const page = await pdf.getPage(i);
-          const viewport = page.getViewport({ scale });
-
-          canvas.width = viewport.width;
-          canvas.height = viewport.height;
-          ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear memory
-
-          await page.render({
-            canvasContext: ctx,
-            viewport: viewport,
-          }).promise;
-
-          // Convert to JPEG
-          const blob = await new Promise<Blob | null>((resolve) => 
-            canvas.toBlob(resolve, "image/jpeg", quality)
-          );
-
-          if (!blob) throw new Error(`Failed to process page ${i}`);
-
-          const imgBuffer = await blob.arrayBuffer();
-          const jpgImage = await newPdf.embedJpg(imgBuffer);
-          
-          const newPage = newPdf.addPage([jpgImage.width, jpgImage.height]);
-          newPage.drawImage(jpgImage, {
-            x: 0,
-            y: 0,
-            width: jpgImage.width,
-            height: jpgImage.height,
-          });
-
-          // Cleanup PDF.js page
-          page.cleanup();
-        }
-        
-        // Cleanup PDF.js doc
-        loadingTask.destroy();
-        canvas.width = 0;
-        canvas.height = 0;
-
-        dispatch({ type: "UPDATE_PROGRESS", payload: { status: "Finalizing...", percent: 90 } });
-        resultBytes = await newPdf.save({ useObjectStreams: true });
-      }
-
-      if (signal.aborted) throw new Error("Aborted");
-
-      // --- Result Handling ---
-      // const blob = new Blob([resultBytes], { type: ALLOWED_MIME });
-      const blob = new Blob([resultBytes as any], {
-        type: ALLOWED_MIME,
-      });
+      const blob = new Blob([safeBytes], { type: ALLOWED_MIME });
       const url = URL.createObjectURL(blob);
 
-      dispatch({ type: "COMPLETE", payload: { url, size: blob.size } });
+      dispatch({ type: "COMPLETE", payload: { url, size: blob.size, isOptimized } });
 
     } catch (err: any) {
-      if (signal.aborted || err.message === "Aborted") {
-        console.log("Processing cancelled");
-      } else {
-        console.error(err);
-        
-        let msg = err.message || "Failed to compress PDF.";
-        if (msg.includes("fake worker") || msg.includes("Cannot load script")) {
-            msg = "Rasterization failed due to browser environment restrictions. Please try 'Lossless' mode.";
-        }
-        
-        dispatch({ type: "ERROR", payload: msg });
-      }
-    }
-  };
+      console.error("Compression Error:", err);
+      
+      let errorMessage = "An unexpected error occurred during compression.";
 
-  const handleCancel = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
+      if (err instanceof PasswordProtectedError) {
+        errorMessage = err.message; 
+      } else if (err instanceof PdfServiceError) {
+        errorMessage = err.message; 
+      } else if (err instanceof Error) {
+        errorMessage = err.message;
+      }
+
+      dispatch({ type: "ERROR", payload: errorMessage });
     }
-    dispatch({ type: "CANCEL" });
   };
 
   const reset = () => {
-    handleCancel();
     dispatch({ type: "RESET" });
   };
 
@@ -501,9 +404,10 @@ export default function PdfCompressorTool() {
         
         {state.error && (
           <div className="error-box">
-            <Icons.Alert /> {state.error}
+            <Icons.Alert /> 
+            <span style={{ flex: 1 }}>{state.error}</span>
             <button 
-              onClick={() => dispatch({ type: "ERROR", payload: null } as any)} // Type hack for clearing error
+              onClick={() => dispatch({ type: "ERROR", payload: null } as any)} 
               style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: 'inherit' }}
             >
               <Icons.X />
@@ -511,37 +415,16 @@ export default function PdfCompressorTool() {
           </div>
         )}
 
-        {/* --- STATE: IDLE (Upload) --- */}
+        {/* --- STATE: IDLE (REPLACED WITH NEW DROPZONE) --- */}
         {!state.file && (
-          <div 
-            className="dropzone"
-            onClick={() => fileInputRef.current?.click()}
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={(e) => {
-              e.preventDefault();
-              handleFileSelect(e.dataTransfer.files);
-            }}
-          >
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".pdf"
-              onChange={(e) => handleFileSelect(e.target.files)}
-              className="visually-hidden"
-            />
-            <div className="drop-icon" style={{ color: '#3b82f6' }}>
-              <Icons.Upload />
-            </div>
-            <div>
-              <h3 style={{ margin: '0 0 0.5rem 0', color: '#1f2937' }}>
-                Select PDF file to compress
-              </h3>
-              <p style={{ margin: 0, fontSize: '0.85rem' }}>Max 100MB. 100% Client-side processing.</p>
-            </div>
-          </div>
+          <FileDropzone 
+            onFileSelect={(file) => handleFileSelect([file])} 
+            title="Select PDF file to compress"
+            footerText="Max 100MB. 100% Secure. Files never leave your device."
+          />
         )}
 
-        {/* --- STATE: FILE SELECTED (Settings) --- */}
+        {/* --- STATE: FILE SELECTED (PRESERVED) --- */}
         {state.file && (
           <div className="controls-area">
             <div className="file-card">
@@ -563,13 +446,25 @@ export default function PdfCompressorTool() {
             </div>
 
             {state.status === "success" ? (
-               <div className="success-card">
-                 <h3 style={{ margin: "0 0 0.5rem 0" }}>Compression Complete!</h3>
+               <div className={state.isAlreadyOptimized ? "info-card" : "success-card"}>
+                 <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '0.5rem' }}>
+                    {state.isAlreadyOptimized ? <Icons.Check /> : <Icons.Check />} 
+                 </div>
+                 
+                 <h3 style={{ margin: "0 0 0.5rem 0" }}>
+                    {state.isAlreadyOptimized ? "File is already optimized!" : "Compression Complete!"}
+                 </h3>
+                 
                  <p style={{ margin: 0, fontSize: "0.9rem" }}>
                    New size: <strong>{formatSize(state.outputSize || 0)}</strong>
-                   {state.outputSize && state.file.size && (
+                   {!state.isAlreadyOptimized && state.outputSize && state.file.size && (
                      <span style={{ marginLeft: "0.5rem", opacity: 0.8 }}>
                        (-{Math.max(0, ((state.file.size - state.outputSize) / state.file.size * 100)).toFixed(0)}%)
+                     </span>
+                   )}
+                   {state.isAlreadyOptimized && (
+                     <span style={{ display: 'block', marginTop: '0.25rem', fontSize: '0.8rem', opacity: 0.8 }}>
+                       We could not reduce the size further without quality loss.
                      </span>
                    )}
                  </p>
@@ -599,15 +494,10 @@ export default function PdfCompressorTool() {
                     onChange={(e) => dispatch({ type: "SET_LEVEL", payload: e.target.value as CompressionLevel })}
                     disabled={state.status === "processing"}
                   >
-                    <option value="lossless">Lossless (Optimize Structures)</option>
-                    <option value="balanced">Recommended (Smaller size, text becomes image)</option>
-                    <option value="strong">Max Compression (Best for sharing, text not selectable)</option>
+                    <option value="balanced">Recommended (Standard Optimization)</option>
+                    <option value="lossless">Lossless (Clean Metadata Only)</option>
+                    <option value="strong">Strong (Aggressive Deduplication)</option>
                   </select>
-                  <p style={{ fontSize: '0.75rem', color: '#6b7280', marginTop: '0.5rem' }}>
-                    {state.level === "lossless" 
-                      ? "Best quality. Removes unused metadata. Might not reduce size of already optimized files."
-                      : "Converts pages to images. Significant size reduction but text becomes non-selectable."}
-                  </p>
                 </div>
 
                 <div className="action-row">
@@ -624,12 +514,12 @@ export default function PdfCompressorTool() {
           </div>
         )}
 
-        {/* --- STATE: PROCESSING OVERLAY --- */}
+        {/* --- STATE: PROCESSING OVERLAY (PRESERVED) --- */}
         {state.status === "processing" && state.progress && (
           <div className="overlay">
             <div className="status-card">
               <h3 style={{ fontSize: "1.1rem", fontWeight: 600, marginBottom: "0.5rem" }}>
-                Compressing...
+                Processing...
               </h3>
               <p style={{ fontSize: "0.9rem", color: "#6b7280", margin: 0 }}>
                 {state.progress.status}
@@ -641,14 +531,6 @@ export default function PdfCompressorTool() {
                   style={{ width: `${state.progress.percent}%` }}
                 />
               </div>
-
-              <button 
-                className="btn btn-danger"
-                style={{ width: 'auto', display: 'inline-flex', padding: '0.5rem 1rem' }}
-                onClick={handleCancel}
-              >
-                Cancel
-              </button>
             </div>
           </div>
         )}

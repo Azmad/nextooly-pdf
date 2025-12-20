@@ -6,7 +6,7 @@ export function GET() {
   const body = `User-agent: *
 Allow: /
 
-Sitemap: https://compress.nextooly.com/sitemap.xml
+Sitemap: https://pdf.nextooly.com/sitemap.xml
 `;
   return new NextResponse(body, {
     headers: {
