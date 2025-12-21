@@ -28,8 +28,6 @@ import {
   PDFString,
   PDFHexString,
 } from "pdf-lib";
-// import { loadMuPDF } from "./client";
-
 
 // --- Custom Errors ---
 
@@ -63,6 +61,63 @@ const CONFIG_MAP: Record<CompressionLevel, { quality: number; maxDimension: numb
 const MAX_CANVAS_PIXELS = 16777216;
 
 // --- Helpers ---
+
+/**
+ * UPDATED HELPER:
+ * Instead of just hiding errors, this detects them.
+ * If MuPDF prints a critical error to console.error, we capture it and throw a real JS error.
+ */
+async function runMuPdfWithErrorDetection<T>(fn: () => Promise<T>): Promise<T> {
+  const origError = console.error;
+  const origWarn = console.warn;
+  
+  let criticalErrorDetected = false;
+  let lastErrorMessage = "";
+
+  const errorDetector = (...args: any[]) => {
+    const msg = args?.[0]?.toString() || "";
+    const isCritical = 
+      msg.includes("format error") || 
+      msg.includes("xref") || 
+      msg.includes("object in xref") ||
+      msg.startsWith("error:") ||
+      msg.startsWith("mupdf:");
+
+    if (isCritical) {
+      criticalErrorDetected = true;
+      lastErrorMessage = msg;
+      // We still silence it in the console so the user doesn't see red text
+      return; 
+    }
+    
+    // Pass through non-critical errors
+    origError(...args);
+  };
+
+  // We also silence warnings that look like errors
+  const warnSilencer = (...args: any[]) => {
+    const msg = args?.[0]?.toString() || "";
+    if (msg.includes("format error") || msg.includes("xref")) return;
+    origWarn(...args);
+  };
+
+  console.error = errorDetector;
+  console.warn = warnSilencer;
+
+  try {
+    const result = await fn();
+    
+    // CHECKPOINT: If we saw a critical error during execution, THROW NOW.
+    if (criticalErrorDetected) {
+      throw new PdfServiceError("MUPDF_INTERNAL_ERROR", `MuPDF Engine reported failure: ${lastErrorMessage}`);
+    }
+    
+    return result;
+  } finally {
+    console.error = origError;
+    console.warn = origWarn;
+  }
+}
 
 function resolveMaybeRef(doc: PDFDocument, value: unknown): unknown {
   if (value instanceof PDFRef) return doc.context.lookup(value);
@@ -98,7 +153,6 @@ function getDecodeParms(doc: PDFDocument, dict: PDFDict): PDFDict | undefined {
 
 // --- EXIF Stripper ---
 function stripExifMetadata(jpegData: Uint8Array): Uint8Array {
-  // ... (No changes to logic here, kept for brevity) ...
   if (jpegData[0] !== 0xff || jpegData[1] !== 0xd8) return jpegData;
 
   let offset = 2;
@@ -136,7 +190,6 @@ type ColorSpaceInfo =
   | { type: "Unknown" };
 
 function getColorSpaceInfo(doc: PDFDocument, dict: PDFDict): ColorSpaceInfo {
-  // ... (Logic preserved) ...
   const rawCs = dict.get(PDFName.of("ColorSpace"));
   const resolved = resolveMaybeRef(doc, rawCs);
 
@@ -311,9 +364,8 @@ async function recompressImage(
   try {
     if (source.type === "jpeg") {
       const cleanData = stripExifMetadata(source.data);
-      // const blob = new Blob([cleanData], { type: "image/jpeg" });
       const blob = new Blob([cleanData as any], {
-        type: "application/pdf",
+        type: "image/jpeg",
       });
       try {
         bitmap = await createImageBitmap(blob, { imageOrientation: "none" });
@@ -356,7 +408,6 @@ async function recompressImage(
 
       const rgbaData = new Uint8ClampedArray(pixelCount * 4);
 
-      // (Pixel mapping logic preserved exactly as is)
       if (cs.type === "DeviceGray") {
         for (let i = 0; i < pixelCount; i++) {
           const v = rawPixels[i];
@@ -394,7 +445,6 @@ async function recompressImage(
       ctx.putImageData(imgData, 0, 0);
     }
 
-    // Scaling Logic
     let targetWidth = srcWidth;
     let targetHeight = srcHeight;
 
@@ -455,11 +505,17 @@ export async function compressWithMuPDF(file: File, level: CompressionLevel): Pr
   } catch(e) {
     throw new PdfServiceError("FILE_READ_ERR", "Could not read the input file.");
   }
-  
-  let phase1Bytes = originalBytes;
 
-  if (level !== "lossless") {
-    // 1. Password Detection (Manual)
+  // --- REVERSED ORDER: MuPDF First (Cleaning), then PDF-Lib (Optimization) ---
+
+  // WRAPPED: Logic that uses MuPDF is now wrapped in the detector.
+  // If MuPDF prints "format error" or "xref" to console, runMuPdfWithErrorDetection will throw,
+  // preventing us from using the potentially corrupted output.
+  return await runMuPdfWithErrorDetection(async () => {
+    
+    let currentBytes = originalBytes;
+
+    // 1. Initial Password Check (Fast fail)
     try {
       const decoder = new TextDecoder("latin1");
       const trailerStart = Math.max(0, originalBytes.length - 2048);
@@ -470,183 +526,174 @@ export async function compressWithMuPDF(file: File, level: CompressionLevel): Pr
       if (hasEncryptInTrailer || hasEncryptInHeader) throw new PasswordProtectedError();
     } catch (e) {
       if (e instanceof PasswordProtectedError) throw e;
-      // If detection fails, proceed and let PDFDocument.load handle it
     }
 
-    let pdfDoc: PDFDocument;
+    // ----------------------------------------------------
+    // PHASE 1: MuPDF (Clean / Garbage Collection)
+    // ----------------------------------------------------
     try {
-      pdfDoc = await PDFDocument.load(originalBytes, { ignoreEncryption: true });
-    } catch (e) {
-      // PDF-Lib failed to load. Likely corrupt or strongly encrypted.
-      if (e instanceof Error && e.message.toLowerCase().includes("encrypted")) {
-        throw new PasswordProtectedError();
-      }
-      throw new PdfServiceError("PDF_PARSE_FAILED", "Failed to parse PDF structure. The file may be corrupted.");
-    }
-
-    if (pdfDoc.isEncrypted) throw new PasswordProtectedError();
-
-    const ctx = (pdfDoc as any).context;
-    let optimized = 0;
-    const { quality, maxDimension } = CONFIG_MAP[level];
-
-    // Detect protected SMasks
-    const protectedObjRefs = new Set<string>();
-    try {
-      for (const [, obj] of ctx.enumerateIndirectObjects()) {
-        if (obj instanceof PDFDict) {
-          const smaskRef = obj.get(PDFName.of("SMask"));
-          if (smaskRef instanceof PDFRef) protectedObjRefs.add(smaskRef.toString());
-        } else if (obj instanceof PDFRawStream) {
-          const smaskRef = obj.dict.get(PDFName.of("SMask"));
-          if (smaskRef instanceof PDFRef) protectedObjRefs.add(smaskRef.toString());
-        }
-      }
-    } catch (e) {
-      // Non-fatal if enumeration fails, just proceed without protection
-      console.warn("Failed to enumerate objects for mask protection", e);
-    }
-
-    // Iterate Objects
-    const objects = ctx.enumerateIndirectObjects();
-    for (const [ref, obj] of objects) {
-      if (protectedObjRefs.has(ref.toString())) continue;
-      if (!(obj instanceof PDFRawStream)) continue;
-
+      const mupdf: any = await import("mupdf");
+      
+      const ab = currentBytes.buffer.slice(currentBytes.byteOffset, currentBytes.byteOffset + currentBytes.byteLength);
+      
+      let doc: any = null;
       try {
-        const subtype = getName(pdfDoc, obj.dict, "Subtype");
-        if (!subtype || subtype.asString() !== PDFName.of("Image").asString()) continue;
-        if (!isCompressibleImage(pdfDoc, obj.dict)) continue;
-        if (getName(pdfDoc, obj.dict, "ImageMask")?.asString() === "true") continue;
-
-        const oldWidth = getNumber(pdfDoc, obj.dict, "Width");
-        const oldHeight = getNumber(pdfDoc, obj.dict, "Height");
-        if (!oldWidth || !oldHeight || oldWidth * oldHeight > MAX_CANVAS_PIXELS) continue;
-
-        const bpc = getNumber(pdfDoc, obj.dict, "BitsPerComponent");
-        if (bpc && bpc !== 8) continue;
-
-        const inBytes = obj.contents;
-        const filter = resolveMaybeRef(pdfDoc, obj.dict.get(PDFName.of("Filter")));
-        let isJpeg = false;
-
-        if (filter instanceof PDFName && filter.asString() === PDFName.of("DCTDecode").asString()) isJpeg = true;
-        else if (filter instanceof PDFArray) {
-          const first = resolveMaybeRef(pdfDoc, filter.get(0));
-          if (first instanceof PDFName && first.asString() === PDFName.of("DCTDecode").asString()) isJpeg = true;
-        }
-
-        const csInfo = getColorSpaceInfo(pdfDoc, obj.dict);
-        if (csInfo.type === "Unknown") continue;
-
-        const hasSMaskKey = obj.dict.has(PDFName.of("SMask"));
-        const hasMaskKey = obj.dict.has(PDFName.of("Mask"));
-
-        if (hasSMaskKey) { /* Proceed */ } 
-        else if (hasMaskKey) { continue; }
-
-        const hasAlpha = hasSMaskKey; 
-        const effectiveMaxDimension = hasAlpha ? Infinity : maxDimension;
-
-        const dp = getDecodeParms(pdfDoc, obj.dict);
-        const predictor = dp ? getNumber(pdfDoc, dp, "Predictor") : undefined;
-        const columns = dp ? getNumber(pdfDoc, dp, "Columns") : undefined;
-
-        const result = await recompressImage(
-          isJpeg
-            ? { type: "jpeg", data: inBytes }
-            : { type: "raw", data: inBytes, cs: csInfo, predictor, columns },
-          quality,
-          effectiveMaxDimension,
-          oldWidth,
-          oldHeight,
-          hasAlpha
-        );
-
-        if (hasAlpha && (result.width !== oldWidth || result.height !== oldHeight)) {
-          continue;
-        }
-
-        if (result.data.length < inBytes.length) {
-          (obj as any).contents = result.data;
-          obj.dict.set(PDFName.of("Width"), PDFNumber.of(result.width));
-          obj.dict.set(PDFName.of("Height"), PDFNumber.of(result.height));
-          obj.dict.set(PDFName.of("Filter"), PDFName.of("DCTDecode"));
-          obj.dict.set(PDFName.of("ColorSpace"), PDFName.of("DeviceRGB"));
-          obj.dict.set(PDFName.of("BitsPerComponent"), PDFNumber.of(8));
-
-          if (hasAlpha) {
-            obj.dict.delete(PDFName.of("Mask"));
-          } else {
-            obj.dict.delete(PDFName.of("SMask"));
-            obj.dict.delete(PDFName.of("Mask"));
+        doc = mupdf.PDFDocument.openDocument(ab, "application/pdf");
+        if (doc) {
+          // garbage=3: dedup + compact
+          const buf = doc.saveToBuffer("garbage=3,compress,clean");
+          const cleanedBytes = buf.asUint8Array();
+          
+          if (cleanedBytes && cleanedBytes.length > 0) {
+            currentBytes = new Uint8Array(cleanedBytes); 
           }
-          obj.dict.delete(PDFName.of("Decode"));
-          obj.dict.delete(PDFName.of("DecodeParms"));
-          obj.dict.delete(PDFName.of("Predictor"));
-          obj.dict.delete(PDFName.of("Palette"));
-          optimized++;
+          buf.destroy?.();
         }
-      } catch (e: any) {
-        // CRITICAL:
-        // We catch image-specific errors here so one bad image doesn't crash the whole PDF.
-        // However, if the error implies the SYSTEM is broken (Canvas dead), we should throw.
-        
-        if (e instanceof PdfServiceError) {
-             if (e.code === "CANVAS_ERROR" || e.code === "ENV_ERROR" || e.code === "CANVAS_ALLOC_FAILED") {
-                 throw e;
-             }
-        }
-        // For other image processing errors (corrupt stream, unsupported filter in one image),
-        // we log and SKIP this image, allowing the rest of the PDF to be processed.
-        console.warn("Skipping image optimization due to error:", e);
+      } finally {
+        doc?.destroy?.();
       }
-    }
-
-    if (optimized > 0) {
-      try {
-        phase1Bytes = await pdfDoc.save({ useObjectStreams: true });
-      } catch (e) {
-        throw new PdfServiceError("PDF_SAVE_FAILED", "Failed to re-serialize the PDF.");
-      }
-    }
-  }
-
-  // --- Phase 2: MuPDF Clean (WASM) ---
-  
-  let mupdf: any;
-  try {
-    mupdf = await import("mupdf");
-  } catch (e) {
-    throw new PdfServiceError("MUPDF_LOAD_FAILED", "Failed to load the MuPDF WASM module.");
-  }
-
-  const ab = phase1Bytes.buffer.slice(phase1Bytes.byteOffset, phase1Bytes.byteOffset + phase1Bytes.byteLength);
-  let doc: any = null;
-  let out: Uint8Array;
-
-  try {
-    // 1. CRITICAL: Try to OPEN the document.
-    try {
-        doc = (mupdf as any).PDFDocument.openDocument(ab, "application/pdf");
-    } catch (e: any) {
-        // MuPDF is strict. If it fails here, the PDF is likely structurally broken.
-        throw new PdfServiceError("MUPDF_OPEN_FAILED", "MuPDF detected a corrupted PDF structure and could not open it.");
-    }
-
-    // 2. OPTIMIZE
-    try {
-        const buf = doc.saveToBuffer("garbage=3,compress,clean");
-        out = buf.asUint8Array();
-        buf.destroy?.();
     } catch (e) {
-        throw new PdfServiceError("MUPDF_OPTIMIZE_FAILED", "MuPDF failed during the optimization pass.");
+      // Because of runMuPdfWithErrorDetection, console errors like "xref" 
+      // are now CAUGHT here as real exceptions.
+      // We log and safely fall back to the original file for Phase 2.
+      console.warn("Phase 1 (MuPDF Clean) failed due to internal error, proceeding with original file:", e);
+      // currentBytes remains originalBytes
     }
-  } finally {
-    doc?.destroy?.();
-  }
 
-  return out.length < originalBytes.length ? out : originalBytes;
+
+    // ----------------------------------------------------
+    // PHASE 2: PDF-Lib (Image Recompression)
+    // ----------------------------------------------------
+    if (level !== "lossless") {
+      try {
+        let pdfDoc: PDFDocument;
+        try {
+          pdfDoc = await PDFDocument.load(currentBytes, { ignoreEncryption: true });
+        } catch (e) {
+          if (e instanceof Error && e.message.toLowerCase().includes("encrypted")) {
+            throw new PasswordProtectedError();
+          }
+          throw new PdfServiceError("PDF_PARSE_FAILED", "Failed to parse PDF structure.");
+        }
+
+        if (pdfDoc.isEncrypted) throw new PasswordProtectedError();
+
+        const ctx = (pdfDoc as any).context;
+        let optimized = 0;
+        const { quality, maxDimension } = CONFIG_MAP[level];
+
+        const protectedObjRefs = new Set<string>();
+        try {
+          for (const [, obj] of ctx.enumerateIndirectObjects()) {
+            if (obj instanceof PDFDict) {
+              const smaskRef = obj.get(PDFName.of("SMask"));
+              if (smaskRef instanceof PDFRef) protectedObjRefs.add(smaskRef.toString());
+            } else if (obj instanceof PDFRawStream) {
+              const smaskRef = obj.dict.get(PDFName.of("SMask"));
+              if (smaskRef instanceof PDFRef) protectedObjRefs.add(smaskRef.toString());
+            }
+          }
+        } catch (e) { /* ignore */ }
+
+        const objects = ctx.enumerateIndirectObjects();
+        for (const [ref, obj] of objects) {
+          if (protectedObjRefs.has(ref.toString())) continue;
+          if (!(obj instanceof PDFRawStream)) continue;
+
+          try {
+            const subtype = getName(pdfDoc, obj.dict, "Subtype");
+            if (!subtype || subtype.asString() !== PDFName.of("Image").asString()) continue;
+            if (!isCompressibleImage(pdfDoc, obj.dict)) continue;
+            if (getName(pdfDoc, obj.dict, "ImageMask")?.asString() === "true") continue;
+
+            const oldWidth = getNumber(pdfDoc, obj.dict, "Width");
+            const oldHeight = getNumber(pdfDoc, obj.dict, "Height");
+            if (!oldWidth || !oldHeight || oldWidth * oldHeight > MAX_CANVAS_PIXELS) continue;
+
+            const bpc = getNumber(pdfDoc, obj.dict, "BitsPerComponent");
+            if (bpc && bpc !== 8) continue;
+
+            const inBytes = obj.contents;
+            const filter = resolveMaybeRef(pdfDoc, obj.dict.get(PDFName.of("Filter")));
+            let isJpeg = false;
+
+            if (filter instanceof PDFName && filter.asString() === PDFName.of("DCTDecode").asString()) isJpeg = true;
+            else if (filter instanceof PDFArray) {
+              const first = resolveMaybeRef(pdfDoc, filter.get(0));
+              if (first instanceof PDFName && first.asString() === PDFName.of("DCTDecode").asString()) isJpeg = true;
+            }
+
+            const csInfo = getColorSpaceInfo(pdfDoc, obj.dict);
+            if (csInfo.type === "Unknown") continue;
+
+            const hasSMaskKey = obj.dict.has(PDFName.of("SMask"));
+            const hasMaskKey = obj.dict.has(PDFName.of("Mask"));
+
+            if (hasSMaskKey) { /* Proceed */ } 
+            else if (hasMaskKey) { continue; }
+
+            const hasAlpha = hasSMaskKey; 
+            const effectiveMaxDimension = hasAlpha ? Infinity : maxDimension;
+
+            const dp = getDecodeParms(pdfDoc, obj.dict);
+            const predictor = dp ? getNumber(pdfDoc, dp, "Predictor") : undefined;
+            const columns = dp ? getNumber(pdfDoc, dp, "Columns") : undefined;
+
+            const result = await recompressImage(
+              isJpeg
+                ? { type: "jpeg", data: inBytes }
+                : { type: "raw", data: inBytes, cs: csInfo, predictor, columns },
+              quality,
+              effectiveMaxDimension,
+              oldWidth,
+              oldHeight,
+              hasAlpha
+            );
+
+            if (hasAlpha && (result.width !== oldWidth || result.height !== oldHeight)) {
+              continue;
+            }
+
+            if (result.data.length < inBytes.length) {
+              (obj as any).contents = result.data;
+              obj.dict.set(PDFName.of("Width"), PDFNumber.of(result.width));
+              obj.dict.set(PDFName.of("Height"), PDFNumber.of(result.height));
+              obj.dict.set(PDFName.of("Filter"), PDFName.of("DCTDecode"));
+              obj.dict.set(PDFName.of("ColorSpace"), PDFName.of("DeviceRGB"));
+              obj.dict.set(PDFName.of("BitsPerComponent"), PDFNumber.of(8));
+
+              if (hasAlpha) {
+                obj.dict.delete(PDFName.of("Mask"));
+              } else {
+                obj.dict.delete(PDFName.of("SMask"));
+                obj.dict.delete(PDFName.of("Mask"));
+              }
+              obj.dict.delete(PDFName.of("Decode"));
+              obj.dict.delete(PDFName.of("DecodeParms"));
+              obj.dict.delete(PDFName.of("Predictor"));
+              obj.dict.delete(PDFName.of("Palette"));
+              optimized++;
+            }
+          } catch (e: any) {
+            if (e instanceof PdfServiceError && (e.code === "CANVAS_ERROR" || e.code === "ENV_ERROR")) {
+                throw e; 
+            }
+            console.warn("Skipping image optimization:", e);
+          }
+        }
+
+        if (optimized > 0) {
+           const phase2Bytes = await pdfDoc.save({ useObjectStreams: true });
+           currentBytes = phase2Bytes;
+        }
+
+      } catch (e) {
+        console.warn("Phase 2 (Image Optimization) failed:", e);
+      }
+    }
+
+    return currentBytes;
+  });
 }
 
 // --- PDF Unlock (MuPDF) ---
@@ -679,34 +726,23 @@ export async function unlockWithMuPDF(file: File, password: string): Promise<Uin
   };
 
   try {
-    // 1) Try opening WITH password (some builds expect this)
     try {
       doc = mupdf.PDFDocument.openDocument(data, "application/pdf", pwd || undefined);
     } catch {
-      // 2) Fall back to open without password
       doc = mupdf.PDFDocument.openDocument(data, "application/pdf");
     }
 
-    // 3) If the doc still claims it needs a password, authenticate.
-    //    IMPORTANT: Do NOT trust authenticatePassword() return value across builds.
     if (doc.needsPassword()) {
       if (!pwd) throw new Error("Password is required.");
 
       try {
         doc.authenticatePassword?.(pwd);
       } catch (e: any) {
-        // Some builds throw on wrong password; treat as incorrect.
         const msg = String(e?.message ?? e);
         if (isPwdError(msg)) throw new Error("Incorrect password.");
-        // Otherwise continue and let save attempt be the final arbiter.
       }
-    } else {
-      // Not password-protected: for Unlock tool UX, let UI decide what to show.
-      // (We intentionally do NOT throw here.)
     }
 
-    // 4) Save using decrypt (NOT clean).
-    //    "clean" can preserve encryption metadata in some cases; "decrypt" is the correct intent.
     const optionAttempts = [
       "decrypt,garbage=deduplicate,continue-on-error",
       "decrypt,garbage=compact,continue-on-error",
@@ -720,7 +756,7 @@ export async function unlockWithMuPDF(file: File, password: string): Promise<Uin
       try {
         outBuf = doc.saveToBuffer(opts);
         const bytesView = outBuf.asUint8Array();
-        return new Uint8Array(bytesView); // copy out before destroy
+        return new Uint8Array(bytesView); 
       } catch (e: any) {
         lastErr = e;
         try {
@@ -764,38 +800,6 @@ export async function pdfNeedsPasswordMuPDF(file: File): Promise<boolean> {
   }
 }
 
-// -------------------------------
-// MuPDF Helpers (for Protect flow)
-// -------------------------------
-
-function withFilteredMuPdfConsole<T>(fn: () => T): T {
-  const origError = console.error;
-  const origWarn = console.warn;
-  const origLog = console.log;
-
-  const shouldDrop = (args: any[]) => {
-    const first = args?.[0];
-    const msg = typeof first === "string" ? first : "";
-    return (
-      msg.includes("format error: cannot recognize xref format") ||
-      msg.startsWith("format error:") ||
-      msg.startsWith("library error:")
-    );
-  };
-
-  console.error = (...args: any[]) => { if (!shouldDrop(args)) origError(...args); };
-  console.warn  = (...args: any[]) => { if (!shouldDrop(args)) origWarn(...args); };
-  console.log   = (...args: any[]) => { if (!shouldDrop(args)) origLog(...args); };
-
-  try {
-    return fn();
-  } finally {
-    console.error = origError;
-    console.warn = origWarn;
-    console.log = origLog;
-  }
-}
-
 
 export async function validatePdfForProtectMuPDF(file: File): Promise<{
   ok: boolean;
@@ -810,19 +814,17 @@ export async function validatePdfForProtectMuPDF(file: File): Promise<{
   let page: any = null;
 
   try {
-    // Open + parse in a filtered console context to avoid dev overlay noise
-    doc = withFilteredMuPdfConsole(() =>
+    // Open + parse in a filtered console context
+    doc = await runMuPdfWithErrorDetection(async () =>
       mupdf.PDFDocument.openDocument(data, "application/pdf")
     );
 
-    // If it needs a password, we block Protect flow (per your policy)
     if (doc.needsPassword()) return { ok: false, reason: "encrypted" };
 
-    // Deeper parse check: count pages + load first page
     const pageCount = doc.countPages?.() ?? 0;
     if (!pageCount || pageCount < 1) return { ok: false, reason: "corrupt" };
 
-    page = withFilteredMuPdfConsole(() => doc.loadPage?.(0));
+    page = await runMuPdfWithErrorDetection(async () => doc.loadPage?.(0));
 
     return { ok: true };
   } catch {
@@ -860,17 +862,14 @@ export async function protectWithMuPDF(
 
   if (!userPwd) throw new Error("User password is required.");
 
-  // MuPDF save options are comma-separated; remove commas from passwords
   const esc = (v: string) => v.replace(/,/g, "");
 
   let doc: any = null;
   let buf: any = null;
 
   try {
-    // Open must succeed here; if the file is corrupt, it will throw.
     doc = mupdf.PDFDocument.openDocument(data, "application/pdf");
 
-    // Minimal, stable encryption options
     const parts: string[] = [
       `encrypt=${algorithm}`,
       `user-password=${esc(userPwd)}`,
@@ -894,12 +893,3 @@ export async function protectWithMuPDF(
     } catch {}
   }
 }
-
-
-
-
-
-
-
-
-

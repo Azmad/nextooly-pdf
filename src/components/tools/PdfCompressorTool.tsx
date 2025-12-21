@@ -17,23 +17,18 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
-
 "use client";
 
-import React, {
-  useReducer,
-  useRef,
-  useEffect
-} from "react";
-import { 
-  compressWithMuPDF, 
+import React, { useEffect, useReducer, useRef } from "react";
+import {
+  compressWithMuPDF,
   CompressionLevel,
   PasswordProtectedError,
-  PdfServiceError
+  PdfServiceError,
 } from "@/lib/mupdf/service";
 import FileDropzone from "./FileDropzone";
 
-// --- Types ---
+/** ---------------- Types ---------------- */
 type ProgressState = {
   status: string;
   percent: number;
@@ -47,238 +42,24 @@ type Action =
   | { type: "START_PROCESSING" }
   | { type: "UPDATE_PROGRESS"; payload: ProgressState }
   | { type: "COMPLETE"; payload: { url: string; size: number; isOptimized: boolean } }
-  | { type: "ERROR"; payload: string }
-  | { type: "CANCEL" };
+  | { type: "ERROR"; payload: string | null };
 
 type State = {
-  status: "idle" | "processing" | "success" | "error";
+  step: "upload" | "settings" | "processing" | "done";
   file: File | null;
   level: CompressionLevel;
-  progress: ProgressState | null;
+  progress: ProgressState;
   outputUrl: string | null;
   outputSize: number | null;
-  isAlreadyOptimized: boolean; 
+  isAlreadyOptimized: boolean;
   error: string | null;
 };
 
-// --- Constants ---
-const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
-const ALLOWED_MIME = "application/pdf";
-const MAGIC_BYTES = "%PDF-";
-
-// --- Icons (Kept intact) ---
-const Icons = {
-  Upload: () => (
-    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-      <polyline points="17 8 12 3 7 8" />
-      <line x1="12" y1="3" x2="12" y2="15" />
-    </svg>
-  ),
-  Pdf: () => (
-    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-      <polyline points="14 2 14 8 20 8" />
-      <line x1="16" y1="13" x2="8" y2="13" />
-      <line x1="16" y1="17" x2="8" y2="17" />
-      <polyline points="10 9 9 9 8 9" />
-    </svg>
-  ),
-  Download: () => (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-      <polyline points="7 10 12 15 17 10" />
-      <line x1="12" y1="15" x2="12" y2="3" />
-    </svg>
-  ),
-  Refresh: () => (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M23 4v6h-6" />
-      <path d="M1 20v-6h6" />
-      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-    </svg>
-  ),
-  Alert: () => (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="12" cy="12" r="10" />
-      <line x1="12" y1="8" x2="12" y2="12" />
-      <line x1="12" y1="16" x2="12.01" y2="16" />
-    </svg>
-  ),
-  X: () => (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <line x1="18" y1="6" x2="6" y2="18" />
-      <line x1="6" y1="6" x2="18" y2="18" />
-    </svg>
-  ),
-  Check: () => (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="20 6 9 17 4 12" />
-    </svg>
-  )
-};
-
-// --- Styles (Kept intact) ---
-const STYLES = `
-  .tool-container {
-    font-family: 'Inter', system-ui, -apple-system, sans-serif;
-    margin: 0 auto;
-    color: #374151;
-    background: #ffffff;
-    border-radius: 1rem;
-    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.025);
-    overflow: hidden;
-    border: 1px solid #f3f4f6;
-    position: relative;
-    max-width: 600px;
-  }
-  .controls-area {
-    padding: 1.5rem;
-    background: #ffffff;
-    border-top: 1px solid #f3f4f6;
-  }
-  .file-card {
-    background: #f9fafb;
-    border: 1px solid #e5e7eb;
-    border-radius: 0.5rem;
-    padding: 1rem;
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    margin-bottom: 1.5rem;
-  }
-  .file-info { flex: 1; overflow: hidden; }
-  .file-name { font-weight: 500; color: #1f2937; margin-bottom: 0.25rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .file-meta { font-size: 0.875rem; color: #6b7280; }
-  .settings-grid {
-    display: grid;
-    gap: 1rem;
-    margin-bottom: 1.5rem;
-  }
-  .range-label { display: flex; justify-content: space-between; font-size: 0.875rem; font-weight: 500; margin-bottom: 0.5rem; }
-  .level-select {
-    width: 100%;
-    padding: 0.625rem;
-    border: 1px solid #d1d5db;
-    border-radius: 0.375rem;
-    background: white;
-    font-size: 0.875rem;
-  }
-  .action-row { display: flex; gap: 0.75rem; margin-top: 1rem; }
-  .btn {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    padding: 0.75rem;
-    border-radius: 0.5rem;
-    font-weight: 500;
-    font-size: 0.875rem;
-    transition: all 0.2s;
-    cursor: pointer;
-    border: 1px solid transparent;
-  }
-  .btn-primary { background: #3b82f6; color: white; border-color: #3b82f6; }
-  .btn-primary:hover { background: #2563eb; }
-  .btn-secondary { background: white; border-color: #d1d5db; color: #374151; }
-  .btn-secondary:hover { background: #f9fafb; border-color: #9ca3af; }
-  .btn-danger { background: white; border-color: #fecaca; color: #dc2626; }
-  .btn-danger:hover { background: #fef2f2; border-color: #fca5a5; }
-  .overlay {
-    position: absolute;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(255,255,255,0.96);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 50;
-    backdrop-filter: blur(2px);
-  }
-  .status-card {
-    text-align: center;
-    padding: 2rem;
-    width: 80%;
-  }
-  .progress-bar {
-    width: 100%;
-    height: 6px;
-    background: #e5e7eb;
-    border-radius: 99px;
-    margin: 1rem 0;
-    overflow: hidden;
-  }
-  .progress-fill {
-    height: 100%;
-    background: #3b82f6;
-    transition: width 0.3s ease;
-  }
-  .success-card {
-    background: #f0fdf4;
-    border: 1px solid #bbf7d0;
-    color: #166534;
-    padding: 1rem;
-    border-radius: 0.5rem;
-    margin-bottom: 1.5rem;
-    text-align: center;
-  }
-  .info-card {
-    background: #eff6ff;
-    border: 1px solid #dbeafe;
-    color: #1e40af;
-    padding: 1rem;
-    border-radius: 0.5rem;
-    margin-bottom: 1.5rem;
-    text-align: center;
-  }
-  .error-box {
-    background: #fef2f2;
-    border: 1px solid #fecaca;
-    color: #b91c1c;
-    padding: 0.75rem;
-    border-radius: 0.5rem;
-    margin: 1rem 1.5rem;
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    font-size: 0.875rem;
-  }
-  .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }
-`;
-
-// --- Utils (Kept intact) ---
-const formatSize = (bytes: number): string => {
-  if (bytes === 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
-};
-
-const validateFile = async (file: File): Promise<string | null> => {
-  if (!file) return "No file selected.";
-  if (file.size > MAX_FILE_SIZE) return `File too large (Max ${MAX_FILE_SIZE / 1024 / 1024}MB).`;
-  if (file.type !== ALLOWED_MIME) return "Invalid file type. Please upload a PDF.";
-
-  // Magic Bytes Check
-  try {
-    const slice = file.slice(0, 5);
-    const text = await slice.text();
-    if (!text.startsWith(MAGIC_BYTES)) {
-      return "Invalid PDF file structure.";
-    }
-  } catch (e) {
-    return "Failed to read file.";
-  }
-  return null;
-};
-
-// --- Reducer (Kept intact) ---
 const initialState: State = {
-  status: "idle",
+  step: "upload",
   file: null,
   level: "balanced",
-  progress: null,
+  progress: { status: "Ready", percent: 0 },
   outputUrl: null,
   outputSize: null,
   isAlreadyOptimized: false,
@@ -288,254 +69,375 @@ const initialState: State = {
 function reducer(state: State, action: Action): State {
   switch (action.type) {
     case "RESET":
-      return initialState;
+      return {
+        ...initialState,
+        level: state.level ?? "balanced",
+      };
+
     case "SET_FILE":
-      return { ...initialState, file: action.payload };
+      return {
+        ...state,
+        file: action.payload,
+        step: "settings",
+        error: null,
+        outputUrl: null,
+        outputSize: null,
+        isAlreadyOptimized: false,
+        progress: { status: "Ready", percent: 0 },
+      };
+
     case "SET_LEVEL":
       return { ...state, level: action.payload };
+
     case "START_PROCESSING":
-      return { ...state, status: "processing", error: null, isAlreadyOptimized: false, progress: { status: "Initializing...", percent: 0 } };
+      return {
+        ...state,
+        step: "processing",
+        error: null,
+        progress: { status: "Starting...", percent: 5 },
+      };
+
     case "UPDATE_PROGRESS":
       return { ...state, progress: action.payload };
+
     case "COMPLETE":
-      return { 
-        ...state, 
-        status: "success", 
-        outputUrl: action.payload.url, 
-        outputSize: action.payload.size, 
+      return {
+        ...state,
+        step: "done",
+        outputUrl: action.payload.url,
+        outputSize: action.payload.size,
         isAlreadyOptimized: action.payload.isOptimized,
-        progress: null 
+        progress: { status: "Done", percent: 100 },
       };
+
     case "ERROR":
-      return { ...state, status: "error", error: action.payload, progress: null };
-    case "CANCEL":
-      return { ...state, status: "idle", progress: null, error: "Operation cancelled." };
+      return {
+        ...state,
+        step: state.file ? "settings" : "upload",
+        error: action.payload,
+        progress: { status: "Error", percent: 0 },
+      };
+
     default:
       return state;
   }
 }
 
-// --- Main Component ---
+function formatSize(bytes: number): string {
+  if (!bytes && bytes !== 0) return "-";
+  const units = ["B", "KB", "MB", "GB"];
+  let n = bytes;
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024;
+    i++;
+  }
+  return `${n.toFixed(i === 0 ? 0 : 2)} ${units[i]}`;
+}
+
+/** ---------------- Icons ---------------- */
+const PdfFileIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" className="w-8 h-8 text-red-500 flex-shrink-0">
+    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" fill="currentColor" fillOpacity="0.1" />
+    <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+const CloseIcon = () => (
+  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+  </svg>
+);
+
+const CheckCircleIcon = () => (
+  <svg className="w-10 h-10 text-green-500 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+  </svg>
+);
+
+/** ---------------- Component ---------------- */
 export default function PdfCompressorTool() {
   const [state, dispatch] = useReducer(reducer, initialState);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Cleanup object URL
+  useEffect(() => {
+    return () => {
+      if (state.outputUrl) URL.revokeObjectURL(state.outputUrl);
+      abortRef.current?.abort();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     return () => {
-      if (state.outputUrl) {
-        URL.revokeObjectURL(state.outputUrl);
-      }
+      if (state.outputUrl) URL.revokeObjectURL(state.outputUrl);
     };
   }, [state.outputUrl]);
 
-  // --- UPDATED HANDLER ---
-  // Adjusted to handle both single File (from Dropzone) and FileList (from old input)
   const handleFileSelect = async (files: FileList | File[] | null) => {
-    if (!files || files.length === 0) return;
+    if (!files) return;
+    const fileList = files instanceof FileList ? Array.from(files) : files;
+    if (fileList.length === 0) return;
     
-    // Normalize to single file
-    const file = files instanceof FileList ? files[0] : files[0];
-    
-    const error = await validateFile(file);
-    if (error) {
-      dispatch({ type: "ERROR", payload: error });
+    const file = fileList[0];
+
+    if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+      dispatch({ type: "ERROR", payload: "Please upload a valid PDF file." });
+      return;
+    }
+
+    if (file.size > 100 * 1024 * 1024) {
+      dispatch({ type: "ERROR", payload: "File is too large. Please upload a PDF under 100MB." });
       return;
     }
 
     dispatch({ type: "SET_FILE", payload: file });
-    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   const handleCompress = async () => {
     if (!state.file) return;
-    if (state.outputUrl) URL.revokeObjectURL(state.outputUrl);
+
+    if (state.outputUrl) {
+      URL.revokeObjectURL(state.outputUrl);
+    }
+
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
 
     dispatch({ type: "START_PROCESSING" });
 
     try {
-      dispatch({ type: "UPDATE_PROGRESS", payload: { status: "Initializing engine...", percent: 10 } });
-      await new Promise(resolve => setTimeout(resolve, 100));
-
-      dispatch({ type: "UPDATE_PROGRESS", payload: { status: "Compressing PDF (WASM)...", percent: 40 } });
+      dispatch({ type: "UPDATE_PROGRESS", payload: { status: "Preparing engine...", percent: 10 } });
       
-      // CALLS THE WORKING SERVICE (Preserved)
-      const resultBytes = await compressWithMuPDF(
-        state.file, 
-        state.level as CompressionLevel
-      );
-
-      const isOptimized = resultBytes.length < state.file.size;
-
-      dispatch({ type: "UPDATE_PROGRESS", payload: { status: "Preparing download...", percent: 95 } });
+      // Artificial delay for better UX feel
+      await new Promise(r => setTimeout(r, 600));
       
-      const safeBytes = new Uint8Array(resultBytes.byteLength);
-      safeBytes.set(resultBytes);
+      dispatch({ type: "UPDATE_PROGRESS", payload: { status: "Compressing images...", percent: 40 } });
 
-      const blob = new Blob([safeBytes], { type: ALLOWED_MIME });
+      const resultBytes = await compressWithMuPDF(state.file, state.level);
+
+      const didReduceSize = resultBytes.length < state.file.size;
+
+      dispatch({ type: "UPDATE_PROGRESS", payload: { status: "Finalizing...", percent: 90 } });
+
+      // const blob = new Blob([resultBytes], { type: "application/pdf" });
+      const blob = new Blob([resultBytes as any], {
+        type: "application/pdf",
+      });
       const url = URL.createObjectURL(blob);
 
-      dispatch({ type: "COMPLETE", payload: { url, size: blob.size, isOptimized } });
-
+      dispatch({
+        type: "COMPLETE",
+        payload: {
+          url,
+          size: resultBytes.length,
+          isOptimized: !didReduceSize,
+        },
+      });
     } catch (err: any) {
-      console.error("Compression Error:", err);
-      
-      let errorMessage = "An unexpected error occurred during compression.";
+      if (err?.name === "AbortError") return;
 
       if (err instanceof PasswordProtectedError) {
-        errorMessage = err.message; 
-      } else if (err instanceof PdfServiceError) {
-        errorMessage = err.message; 
-      } else if (err instanceof Error) {
-        errorMessage = err.message;
+        dispatch({ type: "ERROR", payload: "This PDF is password-protected. Please unlock it first." });
+        return;
       }
 
-      dispatch({ type: "ERROR", payload: errorMessage });
+      if (err instanceof PdfServiceError) {
+        dispatch({ type: "ERROR", payload: err.message || "Compression failed due to an invalid PDF." });
+        return;
+      }
+
+      dispatch({ type: "ERROR", payload: err?.message || "Compression failed. Please try another file." });
     }
   };
 
-  const reset = () => {
+  const handleReset = () => {
+    if (state.outputUrl) URL.revokeObjectURL(state.outputUrl);
     dispatch({ type: "RESET" });
   };
 
   return (
-    <>
-      <style>{STYLES}</style>
-      <div className="tool-container">
-        
-        {state.error && (
-          <div className="error-box">
-            <Icons.Alert /> 
-            <span style={{ flex: 1 }}>{state.error}</span>
-            <button 
-              onClick={() => dispatch({ type: "ERROR", payload: null } as any)} 
-              style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: 'inherit' }}
-            >
-              <Icons.X />
-            </button>
+    <div className="w-full px-4 md:px-0">
+      {/* Error Banner */}
+      {state.error && (
+        <div className="w-full max-w-lg mx-auto mb-4 p-3 bg-red-50 text-red-700 border border-red-100 rounded-xl flex items-center justify-between gap-3 shadow-sm animate-in fade-in slide-in-from-top-2">
+          <div className="flex items-center gap-3">
+            <span className="text-xl">⚠️</span>
+            <span className="text-sm font-medium">{state.error}</span>
           </div>
-        )}
+          <button onClick={() => dispatch({ type: "ERROR", payload: null })} className="text-sm font-bold hover:underline">
+            Dismiss
+          </button>
+        </div>
+      )}
 
-        {/* --- STATE: IDLE (REPLACED WITH NEW DROPZONE) --- */}
-        {!state.file && (
+      {/* 1. Upload Step */}
+      {!state.file && (
+        <>
           <FileDropzone 
             onFileSelect={(file) => handleFileSelect([file])} 
             title="Select PDF file to compress"
-            footerText="Max 100MB. 100% Secure. Files never leave your device."
+            footerText="Reduce file size while maintaining quality. Max 100MB."
           />
-        )}
 
-        {/* --- STATE: FILE SELECTED (PRESERVED) --- */}
-        {state.file && (
-          <div className="controls-area">
-            <div className="file-card">
-              <div style={{ color: "#ef4444" }}><Icons.Pdf /></div>
-              <div className="file-info">
-                <div className="file-name">{state.file.name}</div>
-                <div className="file-meta">
-                  Original: {formatSize(state.file.size)}
+          {/* BRIGHTER TIP SECTION */}
+          <div className="mt-6 max-w-lg mx-auto animate-in fade-in slide-in-from-bottom-2 duration-500">
+            <div className="bg-amber-50 border border-amber-100 rounded-2xl p-4 md:p-5 flex items-start gap-4 shadow-sm">
+              <div className="flex-shrink-0 bg-amber-100 text-amber-600 rounded-full w-8 h-8 flex items-center justify-center text-lg">
+                💡
+              </div>
+              <div className="text-sm text-amber-900 leading-relaxed">
+                <span className="font-bold block mb-0.5">Quick Tip</span>
+                PDFs that are already compressed may not shrink much further. Re-compressing might reduce quality without saving space.
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+
+      {/* 2. Settings Step (Compact) */}
+      {state.step === "settings" && state.file && (
+        <div className="w-full max-w-lg mx-auto animate-in fade-in zoom-in-95 duration-300">
+          <div className="bg-white rounded-3xl shadow-xl border border-gray-100 overflow-hidden">
+            
+            {/* File Header - Compact Padding */}
+            <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-3 overflow-hidden">
+                <div className="flex-shrink-0 w-10 h-10 bg-white rounded-xl shadow-sm border border-gray-100 flex items-center justify-center">
+                  <PdfFileIcon />
+                </div>
+                <div className="min-w-0">
+                  <p className="font-bold text-gray-900 truncate text-sm leading-tight" title={state.file.name}>
+                    {state.file.name}
+                  </p>
+                  <p className="text-xs text-gray-500 font-medium mt-0.5">
+                    {formatSize(state.file.size)}
+                  </p>
                 </div>
               </div>
               <button 
-                className="btn-secondary" 
-                style={{ padding: '0.5rem' }} 
-                onClick={reset}
-                disabled={state.status === "processing"}
+                onClick={handleReset} 
+                className="flex-shrink-0 p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-colors"
+                title="Remove file"
               >
-                <Icons.X />
+                 <CloseIcon />
               </button>
             </div>
 
-            {state.status === "success" ? (
-               <div className={state.isAlreadyOptimized ? "info-card" : "success-card"}>
-                 <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '0.5rem' }}>
-                    {state.isAlreadyOptimized ? <Icons.Check /> : <Icons.Check />} 
-                 </div>
-                 
-                 <h3 style={{ margin: "0 0 0.5rem 0" }}>
-                    {state.isAlreadyOptimized ? "File is already optimized!" : "Compression Complete!"}
-                 </h3>
-                 
-                 <p style={{ margin: 0, fontSize: "0.9rem" }}>
-                   New size: <strong>{formatSize(state.outputSize || 0)}</strong>
-                   {!state.isAlreadyOptimized && state.outputSize && state.file.size && (
-                     <span style={{ marginLeft: "0.5rem", opacity: 0.8 }}>
-                       (-{Math.max(0, ((state.file.size - state.outputSize) / state.file.size * 100)).toFixed(0)}%)
-                     </span>
-                   )}
-                   {state.isAlreadyOptimized && (
-                     <span style={{ display: 'block', marginTop: '0.25rem', fontSize: '0.8rem', opacity: 0.8 }}>
-                       We could not reduce the size further without quality loss.
-                     </span>
-                   )}
-                 </p>
-                 <div className="action-row">
-                    <a 
-                      href={state.outputUrl!} 
-                      download={`compressed-${state.file.name}`}
-                      className="btn btn-primary"
-                      style={{ textDecoration: 'none' }}
-                    >
-                      <Icons.Download /> Download PDF
-                    </a>
-                    <button className="btn btn-secondary" onClick={reset}>
-                      <Icons.Refresh /> Start Over
-                    </button>
-                 </div>
-               </div>
-            ) : (
-              <div className="settings-grid">
-                <div>
-                  <div className="range-label">
-                    <span>Compression Mode</span>
-                  </div>
-                  <select 
-                    className="level-select"
+            {/* Controls - Compact Padding */}
+            <div className="p-5 space-y-4 bg-white">
+              <div>
+                <label className="block text-sm font-bold text-gray-900 mb-2">Compression Mode</label>
+                <div className="relative group">
+                  <select
                     value={state.level}
                     onChange={(e) => dispatch({ type: "SET_LEVEL", payload: e.target.value as CompressionLevel })}
-                    disabled={state.status === "processing"}
+                    className="appearance-none w-full bg-white border border-gray-200 text-gray-900 text-sm rounded-xl focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 block p-3 pr-10 shadow-sm transition-all hover:border-gray-300 cursor-pointer font-medium"
                   >
                     <option value="balanced">Recommended (Standard Optimization)</option>
                     <option value="lossless">Lossless (Clean Metadata Only)</option>
-                    <option value="strong">Strong (Aggressive Deduplication)</option>
+                    <option value="strong">Strong (Max Compression)</option>
                   </select>
+                  <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-4 text-gray-400 group-hover:text-gray-600 transition-colors">
+                    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </div>
                 </div>
-
-                <div className="action-row">
-                  <button 
-                    className="btn btn-primary"
-                    onClick={handleCompress}
-                    disabled={state.status === "processing"}
-                  >
-                    Compress PDF
-                  </button>
-                </div>
+                <p className="mt-2 text-xs text-gray-500 leading-relaxed px-1">
+                  Select <span className="font-semibold text-gray-700">"Recommended"</span> for the best balance.
+                </p>
               </div>
-            )}
-          </div>
-        )}
 
-        {/* --- STATE: PROCESSING OVERLAY (PRESERVED) --- */}
-        {state.status === "processing" && state.progress && (
-          <div className="overlay">
-            <div className="status-card">
-              <h3 style={{ fontSize: "1.1rem", fontWeight: 600, marginBottom: "0.5rem" }}>
-                Processing...
-              </h3>
-              <p style={{ fontSize: "0.9rem", color: "#6b7280", margin: 0 }}>
-                {state.progress.status}
-              </p>
-              
-              <div className="progress-bar">
-                <div 
-                  className="progress-fill" 
-                  style={{ width: `${state.progress.percent}%` }}
-                />
-              </div>
+              <button
+                onClick={handleCompress}
+                className="w-full py-3 px-6 bg-blue-600 hover:bg-blue-700 text-white font-bold text-base rounded-xl shadow-lg shadow-blue-600/20 hover:shadow-blue-600/30 transform hover:-translate-y-0.5 active:scale-[0.98] transition-all duration-200"
+              >
+                Compress PDF
+              </button>
             </div>
           </div>
-        )}
+        </div>
+      )}
 
-      </div>
-    </>
+      {/* 3. Processing Step */}
+      {state.step === "processing" && (
+        <div className="w-full max-w-lg mx-auto animate-in fade-in zoom-in-95 duration-300">
+          <div className="bg-white rounded-3xl shadow-xl border border-gray-100 p-8 text-center">
+            <div className="mb-6 flex justify-center relative">
+               <div className="w-16 h-16 border-4 border-blue-50 rounded-full"></div>
+               <div className="w-16 h-16 border-4 border-blue-600 border-t-transparent rounded-full animate-spin absolute top-0 left-1/2 -ml-8"></div>
+            </div>
+            <h3 className="text-lg font-bold text-gray-900 mb-1">{state.progress.status}</h3>
+            <p className="text-xs text-gray-500 mb-6 font-medium">Crunching the data...</p>
+            
+            <div className="w-full bg-gray-100 rounded-full h-1.5 overflow-hidden">
+              <div 
+                className="h-1.5 bg-blue-600 rounded-full transition-all duration-500 ease-out" 
+                style={{ width: `${state.progress.percent}%` }} 
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 4. Done Step - Compact Fit */}
+      {state.step === "done" && state.file && state.outputUrl && (
+        <div className="w-full max-w-lg mx-auto animate-in fade-in zoom-in-95 duration-300">
+          <div className="bg-white rounded-3xl shadow-xl border border-gray-100 p-5 md:p-6 text-center overflow-hidden relative">
+            
+            {/* Success Animation/Icon (Smaller) */}
+            <div className="mb-3 flex justify-center">
+              <div className="rounded-full bg-green-50 p-3 animate-bounce-short">
+                <CheckCircleIcon />
+              </div>
+            </div>
+
+            <h2 className="text-xl font-bold text-gray-900 mb-1 tracking-tight">
+              {state.isAlreadyOptimized ? "File Already Optimized" : "Compression Complete!"}
+            </h2>
+            <p className="text-gray-500 text-xs mb-5 px-4">
+              {state.isAlreadyOptimized 
+                ? "We couldn't reduce the file size further without quality loss."
+                : "Your PDF is now smaller and ready to download."
+              }
+            </p>
+            
+            {/* Stats Card (Compact) */}
+            <div className="flex items-center justify-center gap-0 text-sm text-gray-600 mb-5 bg-gray-50 rounded-xl border border-gray-100 divide-x divide-gray-200 overflow-hidden">
+               <div className="flex-1 py-2 px-2">
+                 <span className="block text-[10px] uppercase tracking-wider font-bold text-gray-400 mb-0.5">Original</span>
+                 <span className="font-bold text-gray-900 text-base">{formatSize(state.file.size)}</span>
+               </div>
+               <div className="flex-1 py-2 px-2 bg-white">
+                 <span className="block text-[10px] uppercase tracking-wider font-bold text-gray-400 mb-0.5">New Size</span>
+                 <span className={`font-bold text-base ${state.isAlreadyOptimized ? "text-gray-900" : "text-green-600"}`}>
+                   {formatSize(state.outputSize || 0)}
+                 </span>
+               </div>
+            </div>
+
+            {/* Actions - Side-by-Side */}
+            <div className="flex gap-3">
+              <a
+                href={state.outputUrl}
+                download={`compressed-${state.file.name.replace(/\.pdf$/i, "")}.pdf`}
+                className="flex-1 flex items-center justify-center py-3 px-4 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm rounded-xl shadow-lg shadow-blue-600/20 hover:shadow-blue-600/30 transform hover:-translate-y-0.5 active:scale-[0.98] transition-all duration-200"
+              >
+                Download
+              </a>
+              <button
+                onClick={handleReset}
+                className="flex-1 py-3 px-4 bg-white border border-gray-200 text-gray-700 font-bold text-sm rounded-xl hover:bg-gray-50 hover:border-gray-300 transition-all"
+              >
+                Start Over
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
