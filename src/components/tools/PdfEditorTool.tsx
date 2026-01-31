@@ -2017,13 +2017,13 @@ export default function PdfEditorTool() {
                             <div
                               style={{
                                 position: "absolute",
-                                left: `${ann.originalBounds!.x * 100}%`,
-                                top: `${ann.originalBounds!.y * 100}%`,
-                                width: `${ann.originalBounds!.width * 100}%`,
-                                height: `${ann.originalBounds!.height * 100}%`,
+                                left: `${ann.x * 100}%`,
+                                top: `${ann.y * 100}%`,
+                                width: `${(ann.width || 0) * 100}%`,
+                                height: `${(ann.height || 0) * 100}%`,
                                 backgroundColor: ann.backgroundColor || "#ffffff",
-                                zIndex: 5, // Below the active text layer
-                                pointerEvents: "none", // Let clicks pass through to canvas if needed
+                                zIndex: 5,
+                                pointerEvents: "none",
                               }}
                             />
 
