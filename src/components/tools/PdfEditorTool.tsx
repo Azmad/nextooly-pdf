@@ -560,7 +560,7 @@ export default function PdfEditorTool() {
     // 5. Create Editable Text
     const textAnn: Annotation = {
       id: id,
-      type: "text",
+      type: "text_edit",
       subtype: "editor",
       groupId: groupId,
       pageIndex: state.currentPage,
