@@ -325,9 +325,12 @@ export default function PdfEditorTool() {
 
         if (isMatch || isGroupMatch) {
           if (currentItem.subtype === "editor") {
-            if (key === "color" && a.type === "text") return { ...a, color: value };
+            if (key === "color" && (a.type === "text" || a.type === "text_edit")) {
+              return { ...a, color: value };
+            }
             if (key === "backgroundColor" && a.type === "redact") return { ...a, color: value };
-            if ((key === "size" || key === "font" || key === "isBold" || key === "isItalic" || key === "isUnderline" || key === "lineHeight") && a.type === "text") {
+            if ((key === "size" || key === "font" || key === "isBold" || key === "isItalic" || key === "isUnderline" || key === "lineHeight") &&
+              (a.type === "text" || a.type === "text_edit")) {
               return { ...a, [key]: value };
             }
             if (a.type === "redact" && (key === "color" || key === "size" || key === "font")) return a;
@@ -774,6 +777,13 @@ export default function PdfEditorTool() {
   const beginDrag = (e: React.MouseEvent, type: "move" | "resize", handle: DragHandleType, ann: Annotation) => {
     e.preventDefault();
     e.stopPropagation();
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur(); // Hides the blinking cursor
+    }
+    const selection = window.getSelection();
+    if (selection) {
+      selection.removeAllRanges(); // Clears any highlighted text
+    }
     dragMode.current = type;
     dragHandle.current = handle;
     hasMoved.current = false;
@@ -2043,21 +2053,29 @@ export default function PdfEditorTool() {
                                 if ((e.target as HTMLElement).closest(".move-handle, .resize-handle, .delete-handle")) return;
 
                                 // 1. Text: Select Only (Existing Logic)
-                                if (ann.type === "text" && !e.ctrlKey && !e.metaKey) {
+                                if (!e.ctrlKey && !e.metaKey) {
                                   e.stopPropagation();
-                                  setState(s => ({ ...s, selectedId: ann.id }));
+                                  if (state.selectedId !== ann.id) {
+                                    setState(s => ({ ...s, selectedId: ann.id }));
+                                  }
                                   return;
                                 }
 
-                                // 2. Freehand: Select Only (New Logic - NO MOVEMENT)
-                                if (ann.subtype === "freehand") {
-                                  e.stopPropagation();
-                                  setState(s => ({ ...s, selectedId: ann.id }));
-                                  return;
-                                }
+                                // if (ann.type === "text" && !e.ctrlKey && !e.metaKey) {
+                                //   e.stopPropagation();
+                                //   setState(s => ({ ...s, selectedId: ann.id }));
+                                //   return;
+                                // }
 
-                                // 3. Others (Rect, Circle, Line, Arrow): Enable Move
-                                beginDrag(e, "move", "move", ann);
+                                // // 2. Freehand: Select Only (New Logic - NO MOVEMENT)
+                                // if (ann.subtype === "freehand") {
+                                //   e.stopPropagation();
+                                //   setState(s => ({ ...s, selectedId: ann.id }));
+                                //   return;
+                                // }
+
+                                // // 3. Others (Rect, Circle, Line, Arrow): Enable Move
+                                // beginDrag(e, "move", "move", ann);
                               }}
                             >
                               <RichTextEditor
