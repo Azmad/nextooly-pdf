@@ -2225,7 +2225,7 @@ export default function PdfEditorTool() {
 
                           {isSel && (
                             <>
-                              {(ann.type === "text" || ann.type === "text_edit") && !isMark && (
+                              {ann.type === "text" && !isMark && (
                                 <>
                                   <div
                                     className="move-handle"
