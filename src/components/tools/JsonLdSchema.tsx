@@ -6,7 +6,7 @@ export default function JsonLdSchema() {
     "@graph": [
       {
         "@type": "SoftwareApplication",
-        "name": "Nextooly PDF Compressor",
+        "name": "Nextooly PDF Tool",
         "operatingSystem": "Web",
         "applicationCategory": "UtilitiesApplication",
         "url": "https://pdf.nextooly.com",
@@ -15,11 +15,11 @@ export default function JsonLdSchema() {
           "price": "0",
           "priceCurrency": "USD"
         },
-        "aggregateRating": {
-          "@type": "AggregateRating",
-          "ratingValue": "4.8",
-          "ratingCount": "1250"
-        }
+        // "aggregateRating": {
+        //   "@type": "AggregateRating",
+        //   "ratingValue": "4.8",
+        //   "ratingCount": "1250"
+        // }
       },
       {
         "@type": "BreadcrumbList",
@@ -36,12 +36,12 @@ export default function JsonLdSchema() {
             "name": "File Conversion",
             "item": "https://nextooly.com/category/file-conversion"
           },
-          {
-            "@type": "ListItem",
-            "position": 3,
-            "name": "PDF Compressor",
-            "item": "https://pdf.nextooly.com"
-          }
+          // {
+          //   "@type": "ListItem",
+          //   "position": 3,
+          //   "name": "PDF Compressor",
+          //   "item": "https://pdf.nextooly.com"
+          // }
         ]
       }
     ]

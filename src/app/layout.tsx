@@ -12,11 +12,11 @@ export const metadata: Metadata = {
     canonical: "/",
   },
   title: {
-    default: "Nextooly PDF Tools — Compress, Protect & Unlock PDFs",
+    default: "Nextooly PDF Tools — Compress, Protect, edit & Unlock PDFs",
     template: "%s | Nextooly",
   },
   applicationName: "Nextooly",
-  description:"Free PDF tools by Nextooly. Compress, protect, and unlock PDFs directly in your browser. 100% client-side, no uploads.",
+  description:"Free PDF tools by Nextooly. Compress, protect, edit and unlock PDFs directly in your browser. 100% client-side, no uploads.",
   keywords: [
   "nextooly",
   "pdf tools",
@@ -127,7 +127,7 @@ export default function RootLayout({
               
               {/* --- REQUIRED: MuPDF Attribution --- */}
               <a 
-                href="https://github.com/Azmad/nextooly-pdf-compressor" 
+                href="https://github.com/Azmad/nextooly-pdf" 
                 target="_blank" 
                 rel="nofollow noreferrer"
                 style={{ textDecoration: "none", color: "#64748b", fontSize: "13px", display: "flex", alignItems: "center", gap: "4px" }}

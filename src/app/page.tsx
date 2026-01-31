@@ -21,11 +21,9 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "Free PDF Tools Online – Nextooly",
     description:
-      "Privacy-first PDF tools to compress, protect, and unlock PDFs online.",
+      "Privacy-first PDF tools to compress, protect, edit and unlock PDFs online.",
   },
 };
-
-
 
 const tiles = [
   {
@@ -44,6 +42,12 @@ const tiles = [
     title: "Unlock PDF",
     description: "Remove a known password from a protected PDF safely.",
     href: "/unlock-pdf",
+    gradient: "from-[#f5faff] via-white to-white",
+  },
+  {
+    title: "Edit PDF",
+    description: "Edit a PDF online for free.",
+    href: "/pdf-edit",
     gradient: "from-[#f5faff] via-white to-white",
   },
 ];

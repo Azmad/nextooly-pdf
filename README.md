@@ -6,6 +6,7 @@ This repository contains the source code for Nextooly’s browser-based PDF tool
 - PDF Compressor
 - Protect PDF
 - Unlock PDF
+- Edit PDF
 
 All tools run **100% client-side** using WebAssembly (WASM).  
 No files, passwords, or user data are uploaded or stored.
@@ -35,4 +36,4 @@ pnpm dev
 “Nextooly” and the Nextooly logo are trademarks of Nextooly.  
 This license does not grant permission to use the Nextooly name or branding without explicit permission.
 
-© 2025 Nextooly
+© 2026 Nextooly

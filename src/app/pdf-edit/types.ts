@@ -1,0 +1,92 @@
+import { TextItem } from "@/lib/mupdf/edit-service";
+
+export type ToolType = "cursor" | "text" | "edit_text" | "draw" | "image" | "rect" | "note" | "line" | "arrow" | "circle" | "redact" | "signature_drop" | "stamp_drop" | "qr_drop";
+export type DragHandleType = "nw" | "ne" | "sw" | "se" | "move" | null;
+
+export type Annotation = {
+  id: string;
+  type: "text" | "path" | "image" | "rect" | "arrow" | "circle" | "redact" | "text_edit" | "line";
+  subtype?: "editor" | "qr" | "stamp" | "signature" | "freehand" | "line" | "watermark";
+  pageIndex: number;
+  x: number; y: number; width?: number; height?: number;
+  content?: string;
+  paths?: { x: number; y: number }[];
+  color?: string;
+  backgroundColor?: string;
+  size?: number;
+  opacity?: number;
+  isFill?: boolean;
+  meta?: { imgAspect?: number; text?: string };
+  font?: string;
+  isBold?: boolean;
+  isItalic?: boolean;
+  isUnderline?: boolean;
+  textStroke?: number;
+  rotation?: number;
+  groupId?: string;
+  lineHeight?: number;
+  originalBounds?: { x: number, y: number, width: number, height: number };
+  originalText?: string;
+  isWatermark?: boolean;
+};
+
+export type HistorySnapshot = {
+  annotations: Annotation[];
+  deletedPages: number[];
+  pageRotations: Record<number, number>;
+  pageOrder: number[];
+  meta?: { title?: string; author?: string; keywords?: string };
+};
+
+export type EditorState = {
+  status: "idle" | "loading" | "ready" | "processing" | "success" | "error";
+  file: File | null;
+  showPageManager: boolean;
+  fileBuffer: ArrayBuffer | null;
+  numPages: number;
+  currentPage: number;
+  scale: number;
+  tool: ToolType;
+  annotations: Annotation[];
+  pageRotations: Record<number, number>;
+  deletedPages: Set<number>;
+  pageOrder: number[];
+  history: HistorySnapshot[];
+  historyStep: number;
+  color: string;
+  font: string;
+  opacity: number;
+  fontSize: number;
+  brushSize: number;
+  selectedId: string | null;
+  error: string | null;
+  showSignatureModal: boolean;
+  showMetadataModal: boolean;
+  showPasswordModal: boolean;
+  flattenOnSave: boolean;
+  savedSignature: string | null;
+  savedStamp: string | null;
+  savedQr: string | null;
+  savedName: string | null;
+  editingId: string | null;
+  showQrModal: boolean;
+  showStampModal: boolean;
+  qrText: string;
+  metadata: {
+    title: string;
+    author: string;
+    keywords: string;
+    subject?: string;
+    creator?: string;
+    producer?: string;
+    creationDate?: Date;
+    modificationDate?: Date;
+  };
+  pageSize: { width: number; height: number };
+  showWatermarkModal: boolean;
+  watermarkText: string;
+  watermarkRange: string;
+  extractedBlocks: TextItem[];
+  activePalette: string[];
+  activeBgPalette: string[];
+};
