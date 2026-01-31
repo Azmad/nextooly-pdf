@@ -1,6 +1,6 @@
 import { TextItem } from "@/lib/mupdf/edit-service";
 
-export type ToolType = "cursor" | "text" | "edit_text" | "draw" | "image" | "rect" | "note" | "line" | "arrow" | "circle" | "redact" | "signature_drop" | "stamp_drop" | "qr_drop";
+export type ToolType = "cursor" | "text" | "edit_text" | "draw" | "image" | "rect" | "note" | "line" | "arrow" | "circle" | "redact" | "signature_drop" | "stamp_drop" | "qr_drop" | "text_edit" ;
 export type DragHandleType = "nw" | "ne" | "sw" | "se" | "move" | null;
 
 export type Annotation = {
