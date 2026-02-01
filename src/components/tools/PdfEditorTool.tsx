@@ -935,6 +935,15 @@ export default function PdfEditorTool() {
         }
       });
 
+      const annotationsForSave = state.annotations.map(a => {
+        if (a.type === "image" && ["stamp", "signature", "qr"].includes(a.subtype || "")) {
+          // Create a copy without the subtype
+          const { subtype, ...rest } = a;
+          return rest;
+        }
+        return a;
+      });
+
       const pdfBytes = await saveEditedPdf(
         state.fileBuffer,
         state.annotations,
@@ -1271,9 +1280,18 @@ export default function PdfEditorTool() {
                   </div>
                 )}
                 {/* Hidden Inputs */}
-                <input ref={imageInputRef} type="file" accept="image/*" hidden onChange={async (e) => {
+                <input ref={imageInputRef} type="file" accept="image/png, image/jpeg, image/jpg" hidden onChange={async (e) => {
                   const f = e.target.files?.[0];
                   if (f) {
+                    // --- VALIDATION START ---
+                    // Explicitly block SVG or other non-supported types
+                    const validTypes = ['image/jpeg', 'image/png', 'image/jpg'];
+                    if (!validTypes.includes(f.type) && f.type !== "image/jpeg") { // Extra check for some browser variations
+                      alert("Only JPEG and PNG images are supported.");
+                      e.target.value = ""; // Clear the selection
+                      return;
+                    }
+                    // --- VALIDATION END ---
                     const reader = new FileReader();
                     reader.onload = (evt) => {
                       const content = evt.target?.result as string;

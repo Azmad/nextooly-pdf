@@ -43,6 +43,12 @@ export const SignatureModal = ({ onClose, onSave }: SignatureModalProps) => {
   const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
     if (!f) return;
+    const validTypes = ['image/jpeg', 'image/png', 'image/jpg'];
+    if (!validTypes.includes(f.type)) {
+       alert("Only JPEG and PNG images are supported.");
+       e.target.value = ""; // Clear the input so they can try again
+       return;
+    }
     const reader = new FileReader();
     reader.onload = async (evt) => {
       let result = evt.target?.result as string;
@@ -74,7 +80,7 @@ export const SignatureModal = ({ onClose, onSave }: SignatureModalProps) => {
           <button className="text-sm text-blue-600 font-medium flex items-center gap-1" onClick={() => sigFileRef.current?.click()}>
             <Icons.ImageIcon /> Upload Image
           </button>
-          <input ref={sigFileRef} type="file" accept="image/*" hidden onChange={handleUpload} />
+          <input ref={sigFileRef} type="file" accept="image/png, image/jpeg, image/jpg" hidden onChange={handleUpload} />
         </div>
         <div className="flex flex-col gap-3 mt-4">
           <div className="flex gap-3">
@@ -177,6 +183,12 @@ export const StampModal = ({ editingId, savedStamp: initialStamp, onClose, onSav
   const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
     if (!f) return;
+    const validTypes = ['image/jpeg', 'image/png', 'image/jpg'];
+    if (!validTypes.includes(f.type)) {
+       alert("Only JPEG and PNG images are supported.");
+       e.target.value = ""; // Clear the input
+       return;
+    }
     const reader = new FileReader();
     reader.onload = (evt) => {
       setPreview(evt.target?.result as string);
@@ -195,7 +207,7 @@ export const StampModal = ({ editingId, savedStamp: initialStamp, onClose, onSav
           >
             <Icons.Upload /> Upload Image
           </button>
-          <input ref={fileRef} type="file" accept="image/*" hidden onChange={handleUpload} />
+          <input ref={fileRef} type="file" accept="image/png, image/jpeg, image/jpg" hidden onChange={handleUpload} />
         </div>
         {preview ? (
           <div className="flex justify-center mb-4 p-4 border rounded bg-white">
