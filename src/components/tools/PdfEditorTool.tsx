@@ -777,13 +777,13 @@ export default function PdfEditorTool() {
   const beginDrag = (e: React.MouseEvent, type: "move" | "resize", handle: DragHandleType, ann: Annotation) => {
     e.preventDefault();
     e.stopPropagation();
-    if (document.activeElement instanceof HTMLElement) {
-      document.activeElement.blur(); // Hides the blinking cursor
-    }
-    const selection = window.getSelection();
-    if (selection) {
-      selection.removeAllRanges(); // Clears any highlighted text
-    }
+    // if (document.activeElement instanceof HTMLElement) {
+    //   document.activeElement.blur(); 
+    // }
+    // const selection = window.getSelection();
+    // if (selection) {
+    //   selection.removeAllRanges(); 
+    // }
     dragMode.current = type;
     dragHandle.current = handle;
     hasMoved.current = false;
@@ -2024,18 +2024,18 @@ export default function PdfEditorTool() {
                       if (ann.type === "text_edit") {
                         return (
                           <React.Fragment key={ann.id}>
-                            <div
+                            {/* <div
                               style={{
                                 position: "absolute",
-                                left: `${ann.x * 100}%`,
-                                top: `${ann.y * 100}%`,
-                                width: `${(ann.width || 0) * 100}%`,
-                                height: `${(ann.height || 0) * 100}%`,
+                                left: `${(ann.originalBounds?.x ?? ann.x) * 100}%`,
+                                top: `${(ann.originalBounds?.y ?? ann.y) * 100}%`,
+                                width: `${(ann.originalBounds?.width ?? ann.width ?? 0) * 100}%`,
+                                height: `${(ann.originalBounds?.height ?? ann.height ?? 0) * 100}%`,
                                 backgroundColor: ann.backgroundColor || "#ffffff",
-                                zIndex: 5,
-                                pointerEvents: "none",
+                                zIndex: 5, // Below the active text layer
+                                pointerEvents: "none", // Let clicks pass through to canvas if needed
                               }}
-                            />
+                            /> */}
 
                             {/* B. EDITABLE TEXT (Movable) */}
                             <div
@@ -2093,6 +2093,7 @@ export default function PdfEditorTool() {
                                 style={{
                                   width: "100%",
                                   height: "100%",
+                                  minHeight: "100%",
                                   background: "transparent", // Background handled by patch
                                   color: ann.color,
                                   fontSize: `${(ann.size || 12) * state.scale}px`,
@@ -2102,8 +2103,9 @@ export default function PdfEditorTool() {
                                   border: "none",
                                   padding: "0",
                                   margin: "0",
-                                  overflow: "visible",
-                                  whiteSpace: "nowrap",
+                                  overflow: "hidden",
+                                  whiteSpace: "pre-wrap",
+                                  wordBreak: "break-word",
                                   fontWeight: ann.isBold ? 'bold' : 'normal',
                                   fontStyle: ann.isItalic ? 'italic' : 'normal',
                                   textDecoration: ann.isUnderline ? 'underline' : 'none',
@@ -2119,6 +2121,28 @@ export default function PdfEditorTool() {
                                     pushHistory({ annotations: n });
                                     setState(s => ({ ...s, selectedId: null }));
                                   }}><Icons.X /></div>
+                                  {/* --- NEW A-/A+ CONTROLS --- */}
+                                  <div
+                                    className="absolute -top-9 left-8 bg-white border border-slate-300 rounded shadow-sm flex items-center px-1 h-7 z-50 gap-1"
+                                    onMouseDown={(e) => e.stopPropagation()}
+                                  >
+                                    <button
+                                      className="w-6 h-full flex items-center justify-center hover:bg-slate-100 rounded text-[10px] font-bold text-slate-700"
+                                      onMouseDown={(e) => { e.preventDefault(); adjustFontSize(-0.1); }}
+                                      title="Decrease Size"
+                                    >
+                                      A-
+                                    </button>
+                                    <div className="w-px h-3 bg-slate-200"></div>
+                                    <button
+                                      className="w-6 h-full flex items-center justify-center hover:bg-slate-100 rounded text-[10px] font-bold text-slate-700"
+                                      onMouseDown={(e) => { e.preventDefault(); adjustFontSize(0.1); }}
+                                      title="Increase Size"
+                                    >
+                                      A+
+                                    </button>
+                                  </div>
+                                  {/* --------------------------- */}
                                   {/* <div className="resize-handle handle-se" onMouseDown={(e) => beginDrag(e, "resize", "se", ann)} /> */}
                                   {(ann.subtype === "qr" || ann.subtype === "stamp" || ann.subtype === "signature") && (
                                     <div
