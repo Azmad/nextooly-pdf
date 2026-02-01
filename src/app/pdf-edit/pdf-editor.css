@@ -494,3 +494,21 @@ nav[aria-label="breadcrumb"] {
     overflow-y: auto;
   }
 }
+/* --- MOBILE UPLOAD WARNING --- */
+.mobile-upload-msg {
+    display: none; /* Hidden by default (Desktop) */
+}
+
+@media (max-width: 768px) {
+    .mobile-upload-msg {
+        display: block; /* Visible on Mobile */
+        margin-top: 1rem;
+        padding: 0.75rem;
+        background-color: #fff7ed; /* Light Orange Background */
+        color: #c2410c;            /* Dark Orange Text */
+        border: 1px solid #fdba74;
+        border-radius: 8px;
+        font-size: 0.85rem;
+        line-height: 1.4;
+    }
+}

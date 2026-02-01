@@ -1118,6 +1118,9 @@ export default function PdfEditorTool() {
               <div className="text-blue-500 mx-auto w-12 h-12 mb-4"><Icons.Upload /></div>
               <h3 className="text-xl font-bold text-gray-800">Upload PDF to Edit</h3>
               <p className="text-gray-500 mt-2 font-medium">Secure, browser-based editing</p>
+              <div className="mobile-upload-msg">
+                <span className="text-lg mr-1">💻</span> We recommend using a <b>Desktop</b> for the best editing experience.
+              </div>
               <input ref={fileInputRef} type="file" accept="application/pdf" hidden onChange={(e) => {
                 const file = e.target.files?.[0];
                 if (file) handleFile(file);
