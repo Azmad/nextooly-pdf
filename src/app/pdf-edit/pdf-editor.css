@@ -428,3 +428,69 @@ nav[aria-label="breadcrumb"] {
   }
   .move-btn:hover:not(:disabled) { background: #f1f5f9; color: #0f172a; border-color: #cbd5e1; }
   .move-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  /* MOBILE / RESPONSIVE STYLES */
+@media (max-width: 768px) {
+  /* 1. Top Navigation: Scrollable & Compact */
+  .top-nav {
+    overflow-x: auto; /* Allow horizontal scroll */
+    gap: 0.5rem;
+    padding-right: 1rem; /* Space for scroll */
+  }
+  
+  /* Hide text labels on mobile, show icons only */
+  .nav-btn span,
+  .nav-btn {
+    font-size: 0; /* Hide text */
+  }
+  .nav-btn svg {
+    margin: 0; /* Center icon */
+    width: 20px;
+    height: 20px;
+  }
+  /* Bring back text for the Brand/Logo */
+  .nav-brand {
+    font-size: 1rem;
+    display: block;
+  }
+  
+  /* 2. Context Toolbar: Scrollable */
+  .context-toolbar {
+    overflow-x: auto;
+    width: 100%;
+    padding-right: 1rem;
+    -webkit-overflow-scrolling: touch; /* Smooth scroll on iOS */
+  }
+  
+  /* 3. Page Grid: Adjust columns */
+  .page-grid-content {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 1rem;
+    padding: 1rem;
+  }
+  
+  /* 4. Bottom Bar: Make it smaller and safer for touch */
+  .bottom-bar-container {
+    bottom: 1rem;
+    max-width: 90%;
+  }
+
+  /* 5. Modals: Full width on mobile */
+  .modal-content {
+    width: 95% !important;
+    padding: 1rem;
+    max-height: 90vh;
+    overflow-y: auto;
+  }
+  
+  /* 6. Dropdowns: Prevent going off-screen */
+  .nav-dropdown-menu {
+    position: fixed;
+    top: 50px;
+    left: 10px;
+    right: 10px;
+    width: auto !important;
+    max-height: 50vh;
+    overflow-y: auto;
+  }
+}
