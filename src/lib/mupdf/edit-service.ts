@@ -1259,36 +1259,57 @@ export async function saveEditedPdf(
       }
     }
 
-    // =========================================================
-    // TYPE: IMAGE
-    // =========================================================
-    else if (ann.type === "image" && ann.content) {
-      try {
-        const imgBytes = await fetch(ann.content).then(r => r.arrayBuffer());
-        const header = new Uint8Array(imgBytes);
-        let img;
 
-        if (header[0] === 0x89 && header[1] === 0x50 && header[2] === 0x4E && header[3] === 0x47) {
-          img = await newDoc.embedPng(imgBytes);
-        } else {
-          img = await newDoc.embedJpg(imgBytes);
-        }
-        let imgW = w;
-        let imgH = h;
-        if (rotation === 90 || rotation === 270) {
-          imgW = h;
-          imgH = w;
-        }
-        page.drawImage(img, {
-          x: pdfX,
-          y: pdfY,
-          width: imgW,  // Use the context-aware width
-          height: imgH, // Use the context-aware height
-          opacity: op,
-          rotate: degrees(rotateDegrees)
-        });
-      } catch (e) { console.error("Img error", e); }
+else if (ann.type === "image" && ann.content) {
+  try {
+    const imgBytes = await fetch(ann.content).then(r => r.arrayBuffer());
+    let img;
+    const header = new Uint8Array(imgBytes);
+    // Embed image
+    if (header[0] === 0x89 && header[1] === 0x50 && header[2] === 0x4E && header[3] === 0x47) {
+      img = await newDoc.embedPng(imgBytes);
+    } else {
+      img = await newDoc.embedJpg(imgBytes);
     }
+
+    // 1. Determine the bounding box (Visual Slot)
+    // If sideways (90/270 deg), we swap dimensions to match PDF axes
+    const isSideways = rotation === 90 || rotation === 270;
+    const boxWidth = isSideways ? h : w;
+    const boxHeight = isSideways ? w : h;
+
+    // 2. Calculate "object-fit: contain" dimensions
+    const imgRatio = img.width / img.height;
+    const boxRatio = boxWidth / boxHeight;
+
+    let drawWidth = boxWidth;
+    let drawHeight = boxHeight;
+
+    // If image is "wider" than the box, constrain by width
+    if (imgRatio > boxRatio) {
+      drawHeight = boxWidth / imgRatio;
+    } 
+    // If image is "taller" than the box, constrain by height
+    else {
+      drawWidth = boxHeight * imgRatio;
+    }
+
+    // 3. Center the image within the bounding box
+    const xOffset = (boxWidth - drawWidth) / 2;
+    const yOffset = (boxHeight - drawHeight) / 2;
+
+    // 4. Draw with corrected aspect ratio
+    page.drawImage(img, {
+      x: pdfX + xOffset,
+      y: pdfY + yOffset,
+      width: drawWidth,
+      height: drawHeight,
+      opacity: op,
+      rotate: degrees(rotateDegrees)
+    });
+
+  } catch (e) { console.error("Img error", e); }
+}
 
     // =========================================================
     // TYPE: LINE / ARROW / PATH
