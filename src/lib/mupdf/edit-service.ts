@@ -1299,7 +1299,7 @@ else if (ann.type === "image" && ann.content) {
     const yOffset = (boxHeight - drawHeight) / 2;
 
     // 4. Draw with corrected aspect ratio
-    page.drawImage(img, {
+    page.drawImage(img, { 
       x: pdfX + xOffset,
       y: pdfY + yOffset,
       width: drawWidth,
