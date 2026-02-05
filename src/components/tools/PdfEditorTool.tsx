@@ -104,7 +104,13 @@ export default function PdfEditorTool() {
   // const [eraserPadding, setEraserPadding] = useState(0);
   const [eraserPaddingX, setEraserPaddingX] = useState(0);  // Horizontal (Default 2%)
   const [eraserPaddingY, setEraserPaddingY] = useState(0);
-
+  const [isGridLoading, setGridLoading] = useState(false);
+  const handlePageOperation = (operation: () => void) => {
+    setGridLoading(true);
+    setTimeout(() => {
+      operation();
+    }, 50);
+  };
   // Refs
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -199,6 +205,16 @@ export default function PdfEditorTool() {
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
+
+  useEffect(() => {
+    if (state.showPageManager && isGridLoading) {
+      // Small timeout to allow the browser to paint the grid before removing the spinner
+      const timer = setTimeout(() => {
+        setGridLoading(false);
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [state.showPageManager, isGridLoading]);
 
   useEffect(() => {
     const savedSig = localStorage.getItem("nextooly_signature");
@@ -1837,7 +1853,13 @@ export default function PdfEditorTool() {
                       <button
                         className="p-1.5 hover:bg-gray-100 rounded text-gray-600"
                         title="Organize Pages"
-                        onClick={(e) => { e.stopPropagation(); setState(s => ({ ...s, showPageManager: true })); }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setGridLoading(true);
+                          setTimeout(() => {
+                            setState(s => ({ ...s, showPageManager: true }));
+                          }, 50);
+                        }}
                       >
                         <Icons.Grid />
                       </button>
@@ -2336,6 +2358,15 @@ export default function PdfEditorTool() {
                 </div>
               </div>
             </div>
+
+            {/* NEW: Loading Spinner Overlay */}
+            {isGridLoading && (
+              <div className="loading-overlay">
+                <div className="spinner"></div>
+                <div className="text-slate-600 font-medium">Loading pages...</div>
+              </div>
+            )}
+
             {state.showPageManager && (
               <div className="page-grid-overlay">
                 <div className="page-grid-header">
@@ -2346,7 +2377,7 @@ export default function PdfEditorTool() {
                   <div className="flex gap-4">
                     <button
                       className="px-5 py-2.5 bg-white border border-slate-300 rounded-lg text-slate-700 font-medium hover:bg-slate-50 hover:border-slate-400 transition-all flex items-center gap-2 shadow-sm"
-                      onClick={addBlankPage}
+                      onClick={() => handlePageOperation(addBlankPage)}
                     >
                       <Icons.Plus /> Add Blank Page
                     </button>
@@ -2389,7 +2420,10 @@ export default function PdfEditorTool() {
                                 </div>
                                 <button
                                   className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-md shadow-md flex items-center gap-2 transition-transform active:scale-95"
-                                  onClick={(e) => { e.stopPropagation(); restorePage(item.realIndex); }}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handlePageOperation(() => restorePage(item.realIndex));
+                                  }}
                                 >
                                   <Icons.Undo /> Restore
                                 </button>
@@ -2409,7 +2443,10 @@ export default function PdfEditorTool() {
                                   <button
                                     className="move-btn"
                                     disabled={visualIndex === 0}
-                                    onClick={(e) => { e.stopPropagation(); movePage(visualIndex, 'left'); }}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handlePageOperation(() => movePage(visualIndex, 'left'));
+                                    }}
                                     title="Move Backward"
                                   >
                                     <Icons.ChevronLeft />
@@ -2417,7 +2454,10 @@ export default function PdfEditorTool() {
                                   <button
                                     className="move-btn"
                                     disabled={visualIndex === array.length - 1}
-                                    onClick={(e) => { e.stopPropagation(); movePage(visualIndex, 'right'); }}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handlePageOperation(() => movePage(visualIndex, 'right'));
+                                    }}
                                     title="Move Forward"
                                   >
                                     <Icons.ChevronRight />
@@ -2430,13 +2470,19 @@ export default function PdfEditorTool() {
                               <div className="footer-row">
                                 <button
                                   className="footer-btn"
-                                  onClick={(e) => { e.stopPropagation(); rotatePage(item.realIndex); }}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handlePageOperation(() => rotatePage(item.realIndex));
+                                  }}
                                 >
                                   <Icons.RotateRight />
                                 </button>
                                 <button
                                   className="footer-btn danger"
-                                  onClick={(e) => { e.stopPropagation(); deletePage(item.realIndex); }}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handlePageOperation(() => deletePage(item.realIndex));
+                                  }}
                                 >
                                   <Icons.Trash />
                                 </button>
