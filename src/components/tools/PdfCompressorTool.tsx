@@ -179,7 +179,7 @@ export default function PdfCompressorTool() {
     if (!files) return;
     const fileList = files instanceof FileList ? Array.from(files) : files;
     if (fileList.length === 0) return;
-    
+
     const file = fileList[0];
 
     if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
@@ -197,58 +197,95 @@ export default function PdfCompressorTool() {
 
   const handleCompress = async () => {
     if (!state.file) return;
-
     if (state.outputUrl) {
       URL.revokeObjectURL(state.outputUrl);
     }
-
     abortRef.current?.abort();
     abortRef.current = new AbortController();
-
     dispatch({ type: "START_PROCESSING" });
 
     try {
       dispatch({ type: "UPDATE_PROGRESS", payload: { status: "Preparing engine...", percent: 10 } });
-      
-      // Artificial delay for better UX feel
       await new Promise(r => setTimeout(r, 600));
-      
       dispatch({ type: "UPDATE_PROGRESS", payload: { status: "Compressing images...", percent: 40 } });
-
       const resultBytes = await compressWithMuPDF(state.file, state.level);
-
       const didReduceSize = resultBytes.length < state.file.size;
-
       dispatch({ type: "UPDATE_PROGRESS", payload: { status: "Finalizing...", percent: 90 } });
 
-      // const blob = new Blob([resultBytes], { type: "application/pdf" });
-      const blob = new Blob([resultBytes as any], {
-        type: "application/pdf",
-      });
-      const url = URL.createObjectURL(blob);
+      let url: string;
+      let finalSize: number;
 
+      if (didReduceSize) {
+        const blob = new Blob([resultBytes as any], {
+          type: "application/pdf",
+        });
+        url = URL.createObjectURL(blob);
+        finalSize = resultBytes.length;
+      } else {
+        // url = URL.createObjectURL(state.file);
+        // finalSize = state.file.size;
+        const blob = new Blob([state.file], { type: "application/pdf" });
+        url = URL.createObjectURL(blob);
+        finalSize = state.file.size;
+      }
       dispatch({
         type: "COMPLETE",
         payload: {
           url,
-          size: resultBytes.length,
+          size: finalSize,
           isOptimized: !didReduceSize,
         },
       });
     } catch (err: any) {
       if (err?.name === "AbortError") return;
-
       if (err instanceof PasswordProtectedError) {
         dispatch({ type: "ERROR", payload: "This PDF is password-protected. Please unlock it first." });
         return;
       }
-
       if (err instanceof PdfServiceError) {
         dispatch({ type: "ERROR", payload: err.message || "Compression failed due to an invalid PDF." });
         return;
       }
-
       dispatch({ type: "ERROR", payload: err?.message || "Compression failed. Please try another file." });
+    }
+  };
+
+  const handleSave = async () => {
+    if (!state.outputUrl || !state.file) return;
+
+    try {
+      const response = await fetch(state.outputUrl);
+      const blob = await response.blob();
+
+      // CHANGE: Append a timestamp to make the filename unique every time
+      const timestamp = Math.floor(Date.now() / 1000);
+      const baseName = state.file.name.replace(/\.pdf$/i, "");
+      const fileName = `compressed-${baseName}-${timestamp}.pdf`;
+
+      // @ts-ignore
+      if (window.showSaveFilePicker) {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: fileName,
+          types: [{
+            description: "PDF Document",
+            accept: { "application/pdf": [".pdf"] },
+          }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+      } else {
+        const link = document.createElement("a");
+        link.href = state.outputUrl;
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      }
+    } catch (err: any) {
+      if (err.name !== "AbortError") {
+        console.error("Save failed:", err);
+      }
     }
   };
 
@@ -275,24 +312,21 @@ export default function PdfCompressorTool() {
       {/* 1. Upload Step */}
       {!state.file && (
         <>
-          <FileDropzone 
-            onFileSelect={(file) => handleFileSelect([file])} 
+          {/* BRIGHTER TIP SECTION */}
+          <div className="mb-6 max-w-lg mx-auto animate-in fade-in slide-in-from-top-2 duration-500">
+            <div className="bg-amber-50 border border-amber-100 rounded-2xl px-4 py-3 flex items-center justify-center gap-3 shadow-sm text-center md:text-left">
+              <span className="text-xl">💡</span>
+              <p className="text-sm text-amber-900 leading-tight">
+                <span className="font-bold">Quick Tip:</span> PDFs that are already compressed may not shrink much further. Re-compressing might reduce quality without saving space.
+              </p>
+            </div>
+          </div>
+
+          <FileDropzone
+            onFileSelect={(file) => handleFileSelect([file])}
             title="Select PDF file to compress"
             footerText="Reduce file size while maintaining quality. Max 100MB."
           />
-
-          {/* BRIGHTER TIP SECTION */}
-          <div className="mt-6 max-w-lg mx-auto animate-in fade-in slide-in-from-bottom-2 duration-500">
-            <div className="bg-amber-50 border border-amber-100 rounded-2xl p-4 md:p-5 flex items-start gap-4 shadow-sm">
-              <div className="flex-shrink-0 bg-amber-100 text-amber-600 rounded-full w-8 h-8 flex items-center justify-center text-lg">
-                💡
-              </div>
-              <div className="text-sm text-amber-900 leading-relaxed">
-                <span className="font-bold block mb-0.5">Quick Tip</span>
-                PDFs that are already compressed may not shrink much further. Re-compressing might reduce quality without saving space.
-              </div>
-            </div>
-          </div>
         </>
       )}
 
@@ -301,7 +335,7 @@ export default function PdfCompressorTool() {
       {state.step === "settings" && state.file && (
         <div className="w-full max-w-lg mx-auto animate-in fade-in zoom-in-95 duration-300">
           <div className="bg-white rounded-3xl shadow-xl border border-gray-100 overflow-hidden">
-            
+
             {/* File Header - Compact Padding */}
             <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between gap-2">
               <div className="flex items-center gap-3 overflow-hidden">
@@ -317,12 +351,12 @@ export default function PdfCompressorTool() {
                   </p>
                 </div>
               </div>
-              <button 
-                onClick={handleReset} 
+              <button
+                onClick={handleReset}
                 className="flex-shrink-0 p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-colors"
                 title="Remove file"
               >
-                 <CloseIcon />
+                <CloseIcon />
               </button>
             </div>
 
@@ -367,16 +401,16 @@ export default function PdfCompressorTool() {
         <div className="w-full max-w-lg mx-auto animate-in fade-in zoom-in-95 duration-300">
           <div className="bg-white rounded-3xl shadow-xl border border-gray-100 p-8 text-center">
             <div className="mb-6 flex justify-center relative">
-               <div className="w-16 h-16 border-4 border-blue-50 rounded-full"></div>
-               <div className="w-16 h-16 border-4 border-blue-600 border-t-transparent rounded-full animate-spin absolute top-0 left-1/2 -ml-8"></div>
+              <div className="w-16 h-16 border-4 border-blue-50 rounded-full"></div>
+              <div className="w-16 h-16 border-4 border-blue-600 border-t-transparent rounded-full animate-spin absolute top-0 left-1/2 -ml-8"></div>
             </div>
             <h3 className="text-lg font-bold text-gray-900 mb-1">{state.progress.status}</h3>
             <p className="text-xs text-gray-500 mb-6 font-medium">Crunching the data...</p>
-            
+
             <div className="w-full bg-gray-100 rounded-full h-1.5 overflow-hidden">
-              <div 
-                className="h-1.5 bg-blue-600 rounded-full transition-all duration-500 ease-out" 
-                style={{ width: `${state.progress.percent}%` }} 
+              <div
+                className="h-1.5 bg-blue-600 rounded-full transition-all duration-500 ease-out"
+                style={{ width: `${state.progress.percent}%` }}
               />
             </div>
           </div>
@@ -387,7 +421,7 @@ export default function PdfCompressorTool() {
       {state.step === "done" && state.file && state.outputUrl && (
         <div className="w-full max-w-lg mx-auto animate-in fade-in zoom-in-95 duration-300">
           <div className="bg-white rounded-3xl shadow-xl border border-gray-100 p-5 md:p-6 text-center overflow-hidden relative">
-            
+
             {/* Success Animation/Icon (Smaller) */}
             <div className="mb-3 flex justify-center">
               <div className="rounded-full bg-green-50 p-3 animate-bounce-short">
@@ -399,35 +433,34 @@ export default function PdfCompressorTool() {
               {state.isAlreadyOptimized ? "File Already Optimized" : "Compression Complete!"}
             </h2>
             <p className="text-gray-500 text-xs mb-5 px-4">
-              {state.isAlreadyOptimized 
+              {state.isAlreadyOptimized
                 ? "We couldn't reduce the file size further without quality loss."
                 : "Your PDF is now smaller and ready to download."
               }
             </p>
-            
+
             {/* Stats Card (Compact) */}
             <div className="flex items-center justify-center gap-0 text-sm text-gray-600 mb-5 bg-gray-50 rounded-xl border border-gray-100 divide-x divide-gray-200 overflow-hidden">
-               <div className="flex-1 py-2 px-2">
-                 <span className="block text-[10px] uppercase tracking-wider font-bold text-gray-400 mb-0.5">Original</span>
-                 <span className="font-bold text-gray-900 text-base">{formatSize(state.file.size)}</span>
-               </div>
-               <div className="flex-1 py-2 px-2 bg-white">
-                 <span className="block text-[10px] uppercase tracking-wider font-bold text-gray-400 mb-0.5">New Size</span>
-                 <span className={`font-bold text-base ${state.isAlreadyOptimized ? "text-gray-900" : "text-green-600"}`}>
-                   {formatSize(state.outputSize || 0)}
-                 </span>
-               </div>
+              <div className="flex-1 py-2 px-2">
+                <span className="block text-[10px] uppercase tracking-wider font-bold text-gray-400 mb-0.5">Original</span>
+                <span className="font-bold text-gray-900 text-base">{formatSize(state.file.size)}</span>
+              </div>
+              <div className="flex-1 py-2 px-2 bg-white">
+                <span className="block text-[10px] uppercase tracking-wider font-bold text-gray-400 mb-0.5">New Size</span>
+                <span className={`font-bold text-base ${state.isAlreadyOptimized ? "text-gray-900" : "text-green-600"}`}>
+                  {formatSize(state.outputSize || 0)}
+                </span>
+              </div>
             </div>
 
             {/* Actions - Side-by-Side */}
             <div className="flex gap-3">
-              <a
-                href={state.outputUrl}
-                download={`compressed-${state.file.name.replace(/\.pdf$/i, "")}.pdf`}
+              <button
+                onClick={handleSave}
                 className="flex-1 flex items-center justify-center py-3 px-4 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm rounded-xl shadow-lg shadow-blue-600/20 hover:shadow-blue-600/30 transform hover:-translate-y-0.5 active:scale-[0.98] transition-all duration-200"
               >
                 Download
-              </a>
+              </button>
               <button
                 onClick={handleReset}
                 className="flex-1 py-3 px-4 bg-white border border-gray-200 text-gray-700 font-bold text-sm rounded-xl hover:bg-gray-50 hover:border-gray-300 transition-all"

@@ -496,6 +496,205 @@ async function recompressImage(
 
 // --- Main Service ---
 
+// export async function compressWithMuPDF(file: File, level: CompressionLevel): Promise<Uint8Array> {
+//   if (typeof window === "undefined") throw new PdfServiceError("CLIENT_ONLY", "This tool can only run in a browser environment.");
+
+//   let originalBytes: Uint8Array;
+//   try {
+//     originalBytes = new Uint8Array(await file.arrayBuffer());
+//   } catch(e) {
+//     throw new PdfServiceError("FILE_READ_ERR", "Could not read the input file.");
+//   }
+
+//   // --- REVERSED ORDER: MuPDF First (Cleaning), then PDF-Lib (Optimization) ---
+
+//   // WRAPPED: Logic that uses MuPDF is now wrapped in the detector.
+//   // If MuPDF prints "format error" or "xref" to console, runMuPdfWithErrorDetection will throw,
+//   // preventing us from using the potentially corrupted output.
+//   return await runMuPdfWithErrorDetection(async () => {
+    
+//     let currentBytes = originalBytes;
+
+//     // 1. Initial Password Check (Fast fail)
+//     try {
+//       const decoder = new TextDecoder("latin1");
+//       const trailerStart = Math.max(0, originalBytes.length - 2048);
+//       const trailerText = decoder.decode(originalBytes.slice(trailerStart));
+//       const hasEncryptInTrailer = trailerText.includes("/Encrypt");
+//       const headerText = decoder.decode(originalBytes.slice(0, Math.min(1024, originalBytes.length)));
+//       const hasEncryptInHeader = headerText.includes("/Encrypt");
+//       if (hasEncryptInTrailer || hasEncryptInHeader) throw new PasswordProtectedError();
+//     } catch (e) {
+//       if (e instanceof PasswordProtectedError) throw e;
+//     }
+
+//     // ----------------------------------------------------
+//     // PHASE 1: MuPDF (Clean / Garbage Collection)
+//     // ----------------------------------------------------
+//     try {
+//       const mupdf: any = await import("mupdf");
+      
+//       const ab = currentBytes.buffer.slice(currentBytes.byteOffset, currentBytes.byteOffset + currentBytes.byteLength);
+      
+//       let doc: any = null;
+//       try {
+//         doc = mupdf.PDFDocument.openDocument(ab, "application/pdf");
+//         if (doc) {
+//           // garbage=3: dedup + compact
+//           const buf = doc.saveToBuffer("garbage=3,compress,clean");
+//           const cleanedBytes = buf.asUint8Array();
+          
+//           if (cleanedBytes && cleanedBytes.length > 0) {
+//             currentBytes = new Uint8Array(cleanedBytes); 
+//           }
+//           buf.destroy?.();
+//         }
+//       } finally {
+//         doc?.destroy?.();
+//       }
+//     } catch (e) {
+//       // Because of runMuPdfWithErrorDetection, console errors like "xref" 
+//       // are now CAUGHT here as real exceptions.
+//       // We log and safely fall back to the original file for Phase 2.
+//       console.warn("Phase 1 (MuPDF Clean) failed due to internal error, proceeding with original file:", e);
+//       // currentBytes remains originalBytes
+//     }
+
+
+//     // ----------------------------------------------------
+//     // PHASE 2: PDF-Lib (Image Recompression)
+//     // ----------------------------------------------------
+//     if (level !== "lossless") {
+//       try {
+//         let pdfDoc: PDFDocument;
+//         try {
+//           pdfDoc = await PDFDocument.load(currentBytes, { ignoreEncryption: true });
+//         } catch (e) {
+//           if (e instanceof Error && e.message.toLowerCase().includes("encrypted")) {
+//             throw new PasswordProtectedError();
+//           }
+//           throw new PdfServiceError("PDF_PARSE_FAILED", "Failed to parse PDF structure.");
+//         }
+
+//         if (pdfDoc.isEncrypted) throw new PasswordProtectedError();
+
+//         const ctx = (pdfDoc as any).context;
+//         let optimized = 0;
+//         const { quality, maxDimension } = CONFIG_MAP[level];
+
+//         const protectedObjRefs = new Set<string>();
+//         try {
+//           for (const [, obj] of ctx.enumerateIndirectObjects()) {
+//             if (obj instanceof PDFDict) {
+//               const smaskRef = obj.get(PDFName.of("SMask"));
+//               if (smaskRef instanceof PDFRef) protectedObjRefs.add(smaskRef.toString());
+//             } else if (obj instanceof PDFRawStream) {
+//               const smaskRef = obj.dict.get(PDFName.of("SMask"));
+//               if (smaskRef instanceof PDFRef) protectedObjRefs.add(smaskRef.toString());
+//             }
+//           }
+//         } catch (e) { /* ignore */ }
+
+//         const objects = ctx.enumerateIndirectObjects();
+//         for (const [ref, obj] of objects) {
+//           if (protectedObjRefs.has(ref.toString())) continue;
+//           if (!(obj instanceof PDFRawStream)) continue;
+
+//           try {
+//             const subtype = getName(pdfDoc, obj.dict, "Subtype");
+//             if (!subtype || subtype.asString() !== PDFName.of("Image").asString()) continue;
+//             if (!isCompressibleImage(pdfDoc, obj.dict)) continue;
+//             if (getName(pdfDoc, obj.dict, "ImageMask")?.asString() === "true") continue;
+
+//             const oldWidth = getNumber(pdfDoc, obj.dict, "Width");
+//             const oldHeight = getNumber(pdfDoc, obj.dict, "Height");
+//             if (!oldWidth || !oldHeight || oldWidth * oldHeight > MAX_CANVAS_PIXELS) continue;
+
+//             const bpc = getNumber(pdfDoc, obj.dict, "BitsPerComponent");
+//             if (bpc && bpc !== 8) continue;
+
+//             const inBytes = obj.contents;
+//             const filter = resolveMaybeRef(pdfDoc, obj.dict.get(PDFName.of("Filter")));
+//             let isJpeg = false;
+
+//             if (filter instanceof PDFName && filter.asString() === PDFName.of("DCTDecode").asString()) isJpeg = true;
+//             else if (filter instanceof PDFArray) {
+//               const first = resolveMaybeRef(pdfDoc, filter.get(0));
+//               if (first instanceof PDFName && first.asString() === PDFName.of("DCTDecode").asString()) isJpeg = true;
+//             }
+
+//             const csInfo = getColorSpaceInfo(pdfDoc, obj.dict);
+//             if (csInfo.type === "Unknown") continue;
+
+//             const hasSMaskKey = obj.dict.has(PDFName.of("SMask"));
+//             const hasMaskKey = obj.dict.has(PDFName.of("Mask"));
+
+//             if (hasSMaskKey) { /* Proceed */ } 
+//             else if (hasMaskKey) { continue; }
+
+//             const hasAlpha = hasSMaskKey; 
+//             const effectiveMaxDimension = hasAlpha ? Infinity : maxDimension;
+
+//             const dp = getDecodeParms(pdfDoc, obj.dict);
+//             const predictor = dp ? getNumber(pdfDoc, dp, "Predictor") : undefined;
+//             const columns = dp ? getNumber(pdfDoc, dp, "Columns") : undefined;
+
+//             const result = await recompressImage(
+//               isJpeg
+//                 ? { type: "jpeg", data: inBytes }
+//                 : { type: "raw", data: inBytes, cs: csInfo, predictor, columns },
+//               quality,
+//               effectiveMaxDimension,
+//               oldWidth,
+//               oldHeight,
+//               hasAlpha
+//             );
+
+//             if (hasAlpha && (result.width !== oldWidth || result.height !== oldHeight)) {
+//               continue;
+//             }
+
+//             if (result.data.length < inBytes.length) {
+//               (obj as any).contents = result.data;
+//               obj.dict.set(PDFName.of("Width"), PDFNumber.of(result.width));
+//               obj.dict.set(PDFName.of("Height"), PDFNumber.of(result.height));
+//               obj.dict.set(PDFName.of("Filter"), PDFName.of("DCTDecode"));
+//               obj.dict.set(PDFName.of("ColorSpace"), PDFName.of("DeviceRGB"));
+//               obj.dict.set(PDFName.of("BitsPerComponent"), PDFNumber.of(8));
+
+//               if (hasAlpha) {
+//                 obj.dict.delete(PDFName.of("Mask"));
+//               } else {
+//                 obj.dict.delete(PDFName.of("SMask"));
+//                 obj.dict.delete(PDFName.of("Mask"));
+//               }
+//               obj.dict.delete(PDFName.of("Decode"));
+//               obj.dict.delete(PDFName.of("DecodeParms"));
+//               obj.dict.delete(PDFName.of("Predictor"));
+//               obj.dict.delete(PDFName.of("Palette"));
+//               optimized++;
+//             }
+//           } catch (e: any) {
+//             if (e instanceof PdfServiceError && (e.code === "CANVAS_ERROR" || e.code === "ENV_ERROR")) {
+//                 throw e; 
+//             }
+//             console.warn("Skipping image optimization:", e);
+//           }
+//         }
+
+//         if (optimized > 0) {
+//            const phase2Bytes = await pdfDoc.save({ useObjectStreams: true });
+//            currentBytes = phase2Bytes;
+//         }
+
+//       } catch (e) {
+//         console.warn("Phase 2 (Image Optimization) failed:", e);
+//       }
+//     }
+
+//     return currentBytes;
+//   });
+// }
 export async function compressWithMuPDF(file: File, level: CompressionLevel): Promise<Uint8Array> {
   if (typeof window === "undefined") throw new PdfServiceError("CLIENT_ONLY", "This tool can only run in a browser environment.");
 
@@ -511,189 +710,199 @@ export async function compressWithMuPDF(file: File, level: CompressionLevel): Pr
   // WRAPPED: Logic that uses MuPDF is now wrapped in the detector.
   // If MuPDF prints "format error" or "xref" to console, runMuPdfWithErrorDetection will throw,
   // preventing us from using the potentially corrupted output.
-  return await runMuPdfWithErrorDetection(async () => {
-    
-    let currentBytes = originalBytes;
+  
+  let currentBytes = originalBytes;
 
-    // 1. Initial Password Check (Fast fail)
-    try {
-      const decoder = new TextDecoder("latin1");
-      const trailerStart = Math.max(0, originalBytes.length - 2048);
-      const trailerText = decoder.decode(originalBytes.slice(trailerStart));
-      const hasEncryptInTrailer = trailerText.includes("/Encrypt");
-      const headerText = decoder.decode(originalBytes.slice(0, Math.min(1024, originalBytes.length)));
-      const hasEncryptInHeader = headerText.includes("/Encrypt");
-      if (hasEncryptInTrailer || hasEncryptInHeader) throw new PasswordProtectedError();
-    } catch (e) {
-      if (e instanceof PasswordProtectedError) throw e;
-    }
+  // 1. Initial Password Check (Fast fail)
+  try {
+    const decoder = new TextDecoder("latin1");
+    const trailerStart = Math.max(0, originalBytes.length - 2048);
+    const trailerText = decoder.decode(originalBytes.slice(trailerStart));
+    const hasEncryptInTrailer = trailerText.includes("/Encrypt");
+    const headerText = decoder.decode(originalBytes.slice(0, Math.min(1024, originalBytes.length)));
+    const hasEncryptInHeader = headerText.includes("/Encrypt");
+    if (hasEncryptInTrailer || hasEncryptInHeader) throw new PasswordProtectedError();
+  } catch (e) {
+    if (e instanceof PasswordProtectedError) throw e;
+  }
 
-    // ----------------------------------------------------
-    // PHASE 1: MuPDF (Clean / Garbage Collection)
-    // ----------------------------------------------------
-    try {
+  // ----------------------------------------------------
+  // PHASE 1: MuPDF (Clean / Garbage Collection)
+  // ----------------------------------------------------
+  try {
+    // We isolate MuPDF execution here. If runMuPdfWithErrorDetection throws (due to console errors),
+    // we catch it below and proceed to Phase 2 with the original file.
+    const cleanedBytes = await runMuPdfWithErrorDetection(async () => {
       const mupdf: any = await import("mupdf");
       
+      // Create a slice to ensure we don't detach the original array buffer if this fails
       const ab = currentBytes.buffer.slice(currentBytes.byteOffset, currentBytes.byteOffset + currentBytes.byteLength);
       
       let doc: any = null;
+      let result: Uint8Array | null = null;
+
       try {
         doc = mupdf.PDFDocument.openDocument(ab, "application/pdf");
         if (doc) {
           // garbage=3: dedup + compact
           const buf = doc.saveToBuffer("garbage=3,compress,clean");
-          const cleanedBytes = buf.asUint8Array();
-          
-          if (cleanedBytes && cleanedBytes.length > 0) {
-            currentBytes = new Uint8Array(cleanedBytes); 
-          }
+          result = buf.asUint8Array();
+          // Copy to new Uint8Array so we can safely destroy buf
+          if (result) result = new Uint8Array(result);
           buf.destroy?.();
         }
       } finally {
         doc?.destroy?.();
       }
-    } catch (e) {
-      // Because of runMuPdfWithErrorDetection, console errors like "xref" 
-      // are now CAUGHT here as real exceptions.
-      // We log and safely fall back to the original file for Phase 2.
-      console.warn("Phase 1 (MuPDF Clean) failed due to internal error, proceeding with original file:", e);
-      // currentBytes remains originalBytes
+      return result;
+    });
+
+    if (cleanedBytes && cleanedBytes.length > 0) {
+      currentBytes = cleanedBytes; 
     }
+  } catch (e) {
+    // Because of runMuPdfWithErrorDetection, console errors like "xref" 
+    // are now CAUGHT here as real exceptions.
+    // We log and safely fall back to the original file for Phase 2.
+    console.warn("Phase 1 (MuPDF Clean) failed due to internal error, proceeding with original file:", e);
+    // currentBytes remains originalBytes
+  }
 
 
-    // ----------------------------------------------------
-    // PHASE 2: PDF-Lib (Image Recompression)
-    // ----------------------------------------------------
-    if (level !== "lossless") {
+  // ----------------------------------------------------
+  // PHASE 2: PDF-Lib (Image Recompression)
+  // ----------------------------------------------------
+  if (level !== "lossless") {
+    try {
+      let pdfDoc: PDFDocument;
       try {
-        let pdfDoc: PDFDocument;
-        try {
-          pdfDoc = await PDFDocument.load(currentBytes, { ignoreEncryption: true });
-        } catch (e) {
-          if (e instanceof Error && e.message.toLowerCase().includes("encrypted")) {
-            throw new PasswordProtectedError();
-          }
-          throw new PdfServiceError("PDF_PARSE_FAILED", "Failed to parse PDF structure.");
-        }
-
-        if (pdfDoc.isEncrypted) throw new PasswordProtectedError();
-
-        const ctx = (pdfDoc as any).context;
-        let optimized = 0;
-        const { quality, maxDimension } = CONFIG_MAP[level];
-
-        const protectedObjRefs = new Set<string>();
-        try {
-          for (const [, obj] of ctx.enumerateIndirectObjects()) {
-            if (obj instanceof PDFDict) {
-              const smaskRef = obj.get(PDFName.of("SMask"));
-              if (smaskRef instanceof PDFRef) protectedObjRefs.add(smaskRef.toString());
-            } else if (obj instanceof PDFRawStream) {
-              const smaskRef = obj.dict.get(PDFName.of("SMask"));
-              if (smaskRef instanceof PDFRef) protectedObjRefs.add(smaskRef.toString());
-            }
-          }
-        } catch (e) { /* ignore */ }
-
-        const objects = ctx.enumerateIndirectObjects();
-        for (const [ref, obj] of objects) {
-          if (protectedObjRefs.has(ref.toString())) continue;
-          if (!(obj instanceof PDFRawStream)) continue;
-
-          try {
-            const subtype = getName(pdfDoc, obj.dict, "Subtype");
-            if (!subtype || subtype.asString() !== PDFName.of("Image").asString()) continue;
-            if (!isCompressibleImage(pdfDoc, obj.dict)) continue;
-            if (getName(pdfDoc, obj.dict, "ImageMask")?.asString() === "true") continue;
-
-            const oldWidth = getNumber(pdfDoc, obj.dict, "Width");
-            const oldHeight = getNumber(pdfDoc, obj.dict, "Height");
-            if (!oldWidth || !oldHeight || oldWidth * oldHeight > MAX_CANVAS_PIXELS) continue;
-
-            const bpc = getNumber(pdfDoc, obj.dict, "BitsPerComponent");
-            if (bpc && bpc !== 8) continue;
-
-            const inBytes = obj.contents;
-            const filter = resolveMaybeRef(pdfDoc, obj.dict.get(PDFName.of("Filter")));
-            let isJpeg = false;
-
-            if (filter instanceof PDFName && filter.asString() === PDFName.of("DCTDecode").asString()) isJpeg = true;
-            else if (filter instanceof PDFArray) {
-              const first = resolveMaybeRef(pdfDoc, filter.get(0));
-              if (first instanceof PDFName && first.asString() === PDFName.of("DCTDecode").asString()) isJpeg = true;
-            }
-
-            const csInfo = getColorSpaceInfo(pdfDoc, obj.dict);
-            if (csInfo.type === "Unknown") continue;
-
-            const hasSMaskKey = obj.dict.has(PDFName.of("SMask"));
-            const hasMaskKey = obj.dict.has(PDFName.of("Mask"));
-
-            if (hasSMaskKey) { /* Proceed */ } 
-            else if (hasMaskKey) { continue; }
-
-            const hasAlpha = hasSMaskKey; 
-            const effectiveMaxDimension = hasAlpha ? Infinity : maxDimension;
-
-            const dp = getDecodeParms(pdfDoc, obj.dict);
-            const predictor = dp ? getNumber(pdfDoc, dp, "Predictor") : undefined;
-            const columns = dp ? getNumber(pdfDoc, dp, "Columns") : undefined;
-
-            const result = await recompressImage(
-              isJpeg
-                ? { type: "jpeg", data: inBytes }
-                : { type: "raw", data: inBytes, cs: csInfo, predictor, columns },
-              quality,
-              effectiveMaxDimension,
-              oldWidth,
-              oldHeight,
-              hasAlpha
-            );
-
-            if (hasAlpha && (result.width !== oldWidth || result.height !== oldHeight)) {
-              continue;
-            }
-
-            if (result.data.length < inBytes.length) {
-              (obj as any).contents = result.data;
-              obj.dict.set(PDFName.of("Width"), PDFNumber.of(result.width));
-              obj.dict.set(PDFName.of("Height"), PDFNumber.of(result.height));
-              obj.dict.set(PDFName.of("Filter"), PDFName.of("DCTDecode"));
-              obj.dict.set(PDFName.of("ColorSpace"), PDFName.of("DeviceRGB"));
-              obj.dict.set(PDFName.of("BitsPerComponent"), PDFNumber.of(8));
-
-              if (hasAlpha) {
-                obj.dict.delete(PDFName.of("Mask"));
-              } else {
-                obj.dict.delete(PDFName.of("SMask"));
-                obj.dict.delete(PDFName.of("Mask"));
-              }
-              obj.dict.delete(PDFName.of("Decode"));
-              obj.dict.delete(PDFName.of("DecodeParms"));
-              obj.dict.delete(PDFName.of("Predictor"));
-              obj.dict.delete(PDFName.of("Palette"));
-              optimized++;
-            }
-          } catch (e: any) {
-            if (e instanceof PdfServiceError && (e.code === "CANVAS_ERROR" || e.code === "ENV_ERROR")) {
-                throw e; 
-            }
-            console.warn("Skipping image optimization:", e);
-          }
-        }
-
-        if (optimized > 0) {
-           const phase2Bytes = await pdfDoc.save({ useObjectStreams: true });
-           currentBytes = phase2Bytes;
-        }
-
+        pdfDoc = await PDFDocument.load(currentBytes, { ignoreEncryption: true });
       } catch (e) {
-        console.warn("Phase 2 (Image Optimization) failed:", e);
+        if (e instanceof Error && e.message.toLowerCase().includes("encrypted")) {
+          throw new PasswordProtectedError();
+        }
+        // If we failed here, we really can't process the file.
+        console.warn("PDF-Lib failed to parse file, returning current bytes:", e);
+        return currentBytes;
       }
-    }
 
-    return currentBytes;
-  });
+      if (pdfDoc.isEncrypted) throw new PasswordProtectedError();
+
+      const ctx = (pdfDoc as any).context;
+      let optimized = 0;
+      const { quality, maxDimension } = CONFIG_MAP[level];
+
+      const protectedObjRefs = new Set<string>();
+      try {
+        for (const [, obj] of ctx.enumerateIndirectObjects()) {
+          if (obj instanceof PDFDict) {
+            const smaskRef = obj.get(PDFName.of("SMask"));
+            if (smaskRef instanceof PDFRef) protectedObjRefs.add(smaskRef.toString());
+          } else if (obj instanceof PDFRawStream) {
+            const smaskRef = obj.dict.get(PDFName.of("SMask"));
+            if (smaskRef instanceof PDFRef) protectedObjRefs.add(smaskRef.toString());
+          }
+        }
+      } catch (e) { /* ignore */ }
+
+      const objects = ctx.enumerateIndirectObjects();
+      for (const [ref, obj] of objects) {
+        if (protectedObjRefs.has(ref.toString())) continue;
+        if (!(obj instanceof PDFRawStream)) continue;
+
+        try {
+          const subtype = getName(pdfDoc, obj.dict, "Subtype");
+          if (!subtype || subtype.asString() !== PDFName.of("Image").asString()) continue;
+          if (!isCompressibleImage(pdfDoc, obj.dict)) continue;
+          if (getName(pdfDoc, obj.dict, "ImageMask")?.asString() === "true") continue;
+
+          const oldWidth = getNumber(pdfDoc, obj.dict, "Width");
+          const oldHeight = getNumber(pdfDoc, obj.dict, "Height");
+          if (!oldWidth || !oldHeight || oldWidth * oldHeight > MAX_CANVAS_PIXELS) continue;
+
+          const bpc = getNumber(pdfDoc, obj.dict, "BitsPerComponent");
+          if (bpc && bpc !== 8) continue;
+
+          const inBytes = obj.contents;
+          const filter = resolveMaybeRef(pdfDoc, obj.dict.get(PDFName.of("Filter")));
+          let isJpeg = false;
+
+          if (filter instanceof PDFName && filter.asString() === PDFName.of("DCTDecode").asString()) isJpeg = true;
+          else if (filter instanceof PDFArray) {
+            const first = resolveMaybeRef(pdfDoc, filter.get(0));
+            if (first instanceof PDFName && first.asString() === PDFName.of("DCTDecode").asString()) isJpeg = true;
+          }
+
+          const csInfo = getColorSpaceInfo(pdfDoc, obj.dict);
+          if (csInfo.type === "Unknown") continue;
+
+          const hasSMaskKey = obj.dict.has(PDFName.of("SMask"));
+          const hasMaskKey = obj.dict.has(PDFName.of("Mask"));
+
+          if (hasSMaskKey) { /* Proceed */ } 
+          else if (hasMaskKey) { continue; }
+
+          const hasAlpha = hasSMaskKey; 
+          const effectiveMaxDimension = hasAlpha ? Infinity : maxDimension;
+
+          const dp = getDecodeParms(pdfDoc, obj.dict);
+          const predictor = dp ? getNumber(pdfDoc, dp, "Predictor") : undefined;
+          const columns = dp ? getNumber(pdfDoc, dp, "Columns") : undefined;
+
+          const result = await recompressImage(
+            isJpeg
+              ? { type: "jpeg", data: inBytes }
+              : { type: "raw", data: inBytes, cs: csInfo, predictor, columns },
+            quality,
+            effectiveMaxDimension,
+            oldWidth,
+            oldHeight,
+            hasAlpha
+          );
+
+          if (hasAlpha && (result.width !== oldWidth || result.height !== oldHeight)) {
+            continue;
+          }
+
+          if (result.data.length < inBytes.length) {
+            (obj as any).contents = result.data;
+            obj.dict.set(PDFName.of("Width"), PDFNumber.of(result.width));
+            obj.dict.set(PDFName.of("Height"), PDFNumber.of(result.height));
+            obj.dict.set(PDFName.of("Filter"), PDFName.of("DCTDecode"));
+            obj.dict.set(PDFName.of("ColorSpace"), PDFName.of("DeviceRGB"));
+            obj.dict.set(PDFName.of("BitsPerComponent"), PDFNumber.of(8));
+
+            if (hasAlpha) {
+              obj.dict.delete(PDFName.of("Mask"));
+            } else {
+              obj.dict.delete(PDFName.of("SMask"));
+              obj.dict.delete(PDFName.of("Mask"));
+            }
+            obj.dict.delete(PDFName.of("Decode"));
+            obj.dict.delete(PDFName.of("DecodeParms"));
+            obj.dict.delete(PDFName.of("Predictor"));
+            obj.dict.delete(PDFName.of("Palette"));
+            optimized++;
+          }
+        } catch (e: any) {
+          if (e instanceof PdfServiceError && (e.code === "CANVAS_ERROR" || e.code === "ENV_ERROR")) {
+              throw e; 
+          }
+          console.warn("Skipping image optimization:", e);
+        }
+      }
+
+      if (optimized > 0) {
+          const phase2Bytes = await pdfDoc.save({ useObjectStreams: true });
+          currentBytes = phase2Bytes;
+      }
+
+    } catch (e) {
+      console.warn("Phase 2 (Image Optimization) failed:", e);
+    }
+  }
+
+  return currentBytes;
 }
 
 // --- PDF Unlock (MuPDF) ---
