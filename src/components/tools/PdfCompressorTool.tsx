@@ -257,14 +257,15 @@ export default function PdfCompressorTool() {
       const response = await fetch(state.outputUrl);
       const blob = await response.blob();
 
-      // CHANGE: Append a timestamp to make the filename unique every time
       const timestamp = Math.floor(Date.now() / 1000);
       const baseName = state.file.name.replace(/\.pdf$/i, "");
       const fileName = `compressed-${baseName}-${timestamp}.pdf`;
 
-      // @ts-ignore
-      if (window.showSaveFilePicker) {
-        const handle = await window.showSaveFilePicker({
+      // FIX: Cast window to 'any' to bypass TypeScript build errors
+      const win = window as any;
+
+      if (win.showSaveFilePicker) {
+        const handle = await win.showSaveFilePicker({
           suggestedName: fileName,
           types: [{
             description: "PDF Document",
