@@ -58,14 +58,23 @@ export const metadata: Metadata = {
     description: "Free PDF tools by Nextooly. 100% client-side, no uploads.",
     images: [`${SITE_URL}/main-logo.png`], 
   },
-  other: {
-  "application/ld+json": JSON.stringify({
+};
+
+const jsonLd = [
+  {
+    "@context": "https://schema.org",
+    "@type": "Organization",
+    name: "Nextooly",
+    url: SITE_URL,
+    logo: `${SITE_URL}/main-logo.png`,
+  },
+  {
     "@context": "https://schema.org",
     "@type": "SoftwareApplication",
     name: "Nextooly PDF Tools",
     applicationCategory: "UtilityApplication",
     operatingSystem: "Web",
-    url: "https://pdf.nextooly.com",
+    url: SITE_URL,
     description:
       "Free online PDF tools by Nextooly to compress, protect, and unlock PDF files using 100% client-side processing.",
     offers: {
@@ -78,10 +87,8 @@ export const metadata: Metadata = {
       name: "Nextooly",
       url: "https://nextooly.com",
     },
-  }),
-},
-
-};
+  },
+];
 
 export default function RootLayout({
   children,
@@ -90,6 +97,15 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
+      <head>
+        {jsonLd.map((schema, i) => (
+          <script
+            key={i}
+            type="application/ld+json"
+            dangerouslySetInnerHTML={{ __html: JSON.stringify(schema) }}
+          />
+        ))}
+      </head>
       {/* Kept paddingBottom: "80px" as requested for Ad reservation */}
       <body 
         className={`${inter.className} antialiased`} 
