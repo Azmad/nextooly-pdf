@@ -1,50 +1,68 @@
 import React from 'react';
 
-export default function JsonLdSchema() {
+export type JsonLdFaqItem = {
+  q: string;
+  a: string;
+};
+
+type JsonLdSchemaProps = {
+  name: string;
+  description: string;
+  url: string;
+  featureList?: string[];
+  faqItems?: JsonLdFaqItem[];
+};
+
+export default function JsonLdSchema({
+  name,
+  description,
+  url,
+  featureList = [],
+  faqItems = [],
+}: JsonLdSchemaProps) {
+  const graph: Record<string, unknown>[] = [
+    {
+      "@type": "WebApplication",
+      "@id": `${url}#app`,
+      name,
+      url,
+      description,
+      applicationCategory: "UtilitiesApplication",
+      operatingSystem: "Any",
+      browserRequirements: "Requires a modern web browser with WebAssembly support",
+      isAccessibleForFree: true,
+      offers: {
+        "@type": "Offer",
+        price: "0",
+        priceCurrency: "USD",
+      },
+      provider: {
+        "@type": "Organization",
+        name: "Nextooly",
+        url: "https://nextooly.com",
+      },
+      ...(featureList.length > 0 ? { featureList } : {}),
+    },
+  ];
+
+  if (faqItems.length > 0) {
+    graph.push({
+      "@type": "FAQPage",
+      "@id": `${url}#faq`,
+      mainEntity: faqItems.map((item) => ({
+        "@type": "Question",
+        name: item.q,
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: item.a,
+        },
+      })),
+    });
+  }
+
   const schema = {
     "@context": "https://schema.org",
-    "@graph": [
-      {
-        "@type": "SoftwareApplication",
-        "name": "Nextooly PDF Tool",
-        "operatingSystem": "Web",
-        "applicationCategory": "UtilitiesApplication",
-        "url": "https://pdf.nextooly.com",
-        "offers": {
-          "@type": "Offer",
-          "price": "0",
-          "priceCurrency": "USD"
-        },
-        // "aggregateRating": {
-        //   "@type": "AggregateRating",
-        //   "ratingValue": "4.8",
-        //   "ratingCount": "1250"
-        // }
-      },
-      {
-        "@type": "BreadcrumbList",
-        "itemListElement": [
-          {
-            "@type": "ListItem",
-            "position": 1,
-            "name": "Home",
-            "item": "https://nextooly.com"
-          },
-          {
-            "@type": "ListItem",
-            "position": 2,
-            "name": "File Conversion",
-            "item": "https://nextooly.com/category/file-conversion"
-          },
-          // {
-          //   "@type": "ListItem",
-          //   "position": 3,
-          //   "name": "PDF Compressor",
-          //   "item": "https://pdf.nextooly.com"
-          // }
-        ]
-      }
-    ]
+    "@graph": graph,
   };
 
   return (

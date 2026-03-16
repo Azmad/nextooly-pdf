@@ -29,7 +29,7 @@ import { RichTextEditor } from "@/app/pdf-edit/RichTextEditor";
 import { PageThumbnail } from "@/app/pdf-edit/PageThumbnail";
 import { INITIAL_STATE } from "@/app/pdf-edit/constants";
 import { getFontClass, getPathBounds } from "@/app/pdf-edit/utils";
-import { SignatureModal, QrModal, StampModal, MetadataModal } from "@/app/pdf-edit/EditorModals";
+import { SignatureModal, QrModal, StampModal, MetadataModal, ConfirmDialog, PromptDialog } from "@/app/pdf-edit/EditorModals";
 import "@/app/pdf-edit/pdf-editor.css";
 import { Icons } from "@/app/pdf-edit/EditorIcons";
 import { renderPageWithMuPDF, getPdfFormFields, type PdfFormField, saveEditedPdf, getPdfPageCount, AVAILABLE_FONTS, getPdfMetadata, getPageText, type TextItem } from "@/lib/mupdf/edit-service";
@@ -100,16 +100,29 @@ export default function PdfEditorTool() {
   const [activeDropdown, setActiveDropdown] = useState<"shapes" | "insert" | null>(null);
   const [isBottomBarExpanded, setBottomBarExpanded] = useState(true);
   const [textSelectMode, setTextSelectMode] = useState<"block" | "line">("line");
-  // const [defaultLineHeight, setDefaultLineHeight] = useState(1.15);
-  // const [eraserPadding, setEraserPadding] = useState(0);
-  const [eraserPaddingX, setEraserPaddingX] = useState(0);  // Horizontal (Default 2%)
+  const [eraserPaddingX, setEraserPaddingX] = useState(0);
   const [eraserPaddingY, setEraserPaddingY] = useState(0);
   const [isGridLoading, setGridLoading] = useState(false);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const [hasEditTextInteracted, setHasEditTextInteracted] = useState(false);
+  const [confirmDialogConfig, setConfirmDialogConfig] = useState<{
+    message: string;
+    confirmLabel?: string;
+    onConfirm: () => void;
+  } | null>(null);
+  const [promptDialogConfig, setPromptDialogConfig] = useState<{
+    message: string;
+    defaultValue?: string;
+    placeholder?: string;
+    onConfirm: (value: string) => void;
+  } | null>(null);
   const handlePageOperation = (operation: () => void) => {
     setGridLoading(true);
-    setTimeout(() => {
+    // Use rAF so the loading overlay paints before the (synchronous) operation runs
+    requestAnimationFrame(() => {
       operation();
-    }, 50);
+      setGridLoading(false);
+    });
   };
   // Refs
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -132,25 +145,124 @@ export default function PdfEditorTool() {
   const hasMoved = useRef(false);
   const loadRequestId = useRef(0);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const savedEditorSelectionRef = useRef<{
+    range: Range;
+    editor: HTMLElement;
+    annotationId: string;
+  } | null>(null);
+  const [fontSizeInputValue, setFontSizeInputValue] = useState("16");
 
   const selectedAnn = useMemo(() => state.annotations.find(a => a.id === state.selectedId), [state.annotations, state.selectedId]);
-  const applyRelativeFontSize = (factor: number) => {
+  const sanitizeHtml = useCallback((html: string) => DOMPurify.sanitize(html, SANITIZE_CONFIG), []);
+  const swapAnnotationPages = useCallback((annotations: Annotation[], firstIndex: number, secondIndex: number) => (
+    annotations.map((ann) => {
+      if (ann.pageIndex === firstIndex) return { ...ann, pageIndex: secondIndex };
+      if (ann.pageIndex === secondIndex) return { ...ann, pageIndex: firstIndex };
+      return ann;
+    })
+  ), []);
+  const removeBlankPageAnnotations = useCallback((annotations: Annotation[], removedIndex: number) => (
+    annotations
+      .filter((ann) => ann.pageIndex !== removedIndex)
+      .map((ann) => ann.pageIndex > removedIndex ? { ...ann, pageIndex: ann.pageIndex - 1 } : ann)
+  ), []);
+
+  const formatFontSizeValue = useCallback((size: number) => {
+    const rounded = Math.round(size * 10) / 10;
+    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+  }, []);
+
+  const getSelectionHost = useCallback((node: Node | null): HTMLElement | null => {
+    if (!node) return null;
+    const element = node.nodeType === Node.ELEMENT_NODE ? node as HTMLElement : node.parentElement;
+    return element?.closest('[contenteditable="true"]') as HTMLElement | null;
+  }, []);
+
+  const getSelectionFontElement = useCallback((range: Range): HTMLElement | null => {
+    const node =
+      range.startContainer.nodeType === Node.ELEMENT_NODE
+        ? range.startContainer.childNodes[Math.max(0, range.startOffset - 1)] || range.startContainer
+        : range.startContainer;
+    return node.nodeType === Node.ELEMENT_NODE ? node as HTMLElement : node.parentElement;
+  }, []);
+
+  const getEditorSelectionContext = useCallback((restoreSaved: boolean = false) => {
     const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
+    if (selection && selection.rangeCount > 0 && !selection.isCollapsed) {
+      const range = selection.getRangeAt(0);
+      const editor = getSelectionHost(range.commonAncestorContainer) || getSelectionHost(selection.anchorNode);
+      if (editor && state.selectedId) {
+        savedEditorSelectionRef.current = {
+          range: range.cloneRange(),
+          editor,
+          annotationId: state.selectedId,
+        };
+        return { selection, range, editor };
+      }
+    }
+
+    if (restoreSaved) {
+      const saved = savedEditorSelectionRef.current;
+      if (saved && saved.annotationId === state.selectedId && saved.editor.isConnected) {
+        const restoredSelection = window.getSelection();
+        if (!restoredSelection) return null;
+        saved.editor.focus();
+        restoredSelection.removeAllRanges();
+        const restoredRange = saved.range.cloneRange();
+        restoredSelection.addRange(restoredRange);
+        return { selection: restoredSelection, range: restoredRange, editor: saved.editor };
+      }
+    }
+
+    return null;
+  }, [getSelectionHost, state.selectedId]);
+
+  const getSelectedTextPointSize = useCallback((restoreSaved: boolean = false) => {
+    const context = getEditorSelectionContext(restoreSaved);
+    if (!context) return null;
+    const element = getSelectionFontElement(context.range);
+    if (!element) return null;
+    const currentPx = parseFloat(window.getComputedStyle(element).fontSize);
+    const currentPdfPoints = currentPx / state.scale;
+    return currentPdfPoints > 0 ? currentPdfPoints : null;
+  }, [getEditorSelectionContext, getSelectionFontElement, state.scale]);
+
+  const wrapEditorSelection = useCallback((
+    applyStyle: (span: HTMLSpanElement) => void,
+    restoreSaved: boolean = false,
+    skipHistory: boolean = false
+  ) => {
+    const context = getEditorSelectionContext(restoreSaved);
+    if (!context) return false;
+
     const span = document.createElement("span");
-    span.style.fontSize = `${factor}em`;
-    const range = selection.getRangeAt(0);
+    applyStyle(span);
+
+    const range = context.range;
     span.appendChild(range.extractContents());
     range.insertNode(span);
-    selection.removeAllRanges();
+
     const newRange = document.createRange();
     newRange.selectNodeContents(span);
-    selection.addRange(newRange);
-    const activeEl = document.querySelector('[contenteditable="true"]:focus');
-    const editor = span.closest('[contenteditable="true"]');
-    if (editor) {
-      updateProperty("content", editor.innerHTML);
-    }
+    context.selection.removeAllRanges();
+    context.selection.addRange(newRange);
+
+    savedEditorSelectionRef.current = state.selectedId
+      ? {
+          range: newRange.cloneRange(),
+          editor: context.editor,
+          annotationId: state.selectedId,
+        }
+      : null;
+
+    updateProperty("content", sanitizeHtml(context.editor.innerHTML), skipHistory);
+    return true;
+  }, [getEditorSelectionContext, sanitizeHtml, state.selectedId]);
+
+  const applyRelativeFontSize = (factor: number, restoreSaved: boolean = false) => {
+    return wrapEditorSelection((span) => {
+      span.style.fontSize = `${factor}em`;
+    }, restoreSaved);
   };
 
   const handleEditAnnotation = (ann: Annotation) => {
@@ -182,18 +294,14 @@ export default function PdfEditorTool() {
   };
 
   const handleSelectionPointChange = (delta: number) => {
-    const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
-    let node = selection.anchorNode;
-    const element = (node?.nodeType === Node.TEXT_NODE ? node.parentElement : node) as HTMLElement;
-    if (!element) return;
-    const currentPx = parseFloat(window.getComputedStyle(element).fontSize);
-    const currentPdfPoints = currentPx / state.scale;
+    const currentPdfPoints = getSelectedTextPointSize(true);
     if (!currentPdfPoints || currentPdfPoints <= 0) return;
     const newPdfPoints = Math.round((currentPdfPoints + delta) * 10) / 10;
     if (newPdfPoints < 1) return;
     const ratio = newPdfPoints / currentPdfPoints;
-    applyRelativeFontSize(ratio);
+    if (applyRelativeFontSize(ratio, true)) {
+      setFontSizeInputValue(formatFontSizeValue(newPdfPoints));
+    }
   };
 
   useEffect(() => {
@@ -217,11 +325,49 @@ export default function PdfEditorTool() {
   }, [state.showPageManager, isGridLoading]);
 
   useEffect(() => {
-    const savedSig = localStorage.getItem("nextooly_signature");
-    const savedName = localStorage.getItem("nextooly_name");
-    const savedStamp = localStorage.getItem("nextooly_stamp");
-    const savedQr = localStorage.getItem("nextooly_qr");
-    setState(s => ({ ...s, savedSignature: savedSig, savedName: savedName, savedStamp: savedStamp, savedQr: savedQr }));
+    const handleSelectionChange = () => {
+      if (!selectedAnn || (selectedAnn.type !== "text" && selectedAnn.type !== "text_edit")) return;
+      const currentSize = getSelectedTextPointSize(false);
+      if (currentSize) {
+        setFontSizeInputValue(formatFontSizeValue(currentSize));
+      }
+    };
+
+    document.addEventListener("selectionchange", handleSelectionChange);
+    return () => document.removeEventListener("selectionchange", handleSelectionChange);
+  }, [formatFontSizeValue, getSelectedTextPointSize, selectedAnn]);
+
+  useEffect(() => {
+    if (!selectedAnn || (selectedAnn.type !== "text" && selectedAnn.type !== "text_edit")) {
+      savedEditorSelectionRef.current = null;
+      return;
+    }
+
+    const currentSize =
+      (selectedAnn.type === "text" || selectedAnn.type === "text_edit")
+        ? getSelectedTextPointSize(false) ?? (selectedAnn.size ?? 16)
+        : (selectedAnn.size ?? 16);
+    setFontSizeInputValue(formatFontSizeValue(currentSize));
+  }, [formatFontSizeValue, getSelectedTextPointSize, selectedAnn]);
+
+  // Safe localStorage accessor — private/incognito mode throws SecurityError
+  const safeLocalStorage = useMemo(() => ({
+    getItem: (key: string): string | null => {
+      try { return window.localStorage.getItem(key); } catch { return null; }
+    },
+    setItem: (key: string, value: string): void => {
+      try { window.localStorage.setItem(key, value); } catch { /* noop */ }
+    },
+  }), []);
+
+  useEffect(() => {
+    setState(s => ({
+      ...s,
+      savedSignature: safeLocalStorage.getItem("nextooly_signature"),
+      savedName: safeLocalStorage.getItem("nextooly_name"),
+      savedStamp: safeLocalStorage.getItem("nextooly_stamp"),
+      savedQr: safeLocalStorage.getItem("nextooly_qr"),
+    }));
   }, []);
 
   // ---------- History ----------
@@ -365,19 +511,12 @@ export default function PdfEditorTool() {
   };
 
   const executeRichTextCommand = (command: string) => {
-    const selection = window.getSelection();
-    if (selection && !selection.isCollapsed && selection.rangeCount > 0) {
-      const isInsideEditor = selection.anchorNode?.parentElement?.closest('[contenteditable="true"]');
-      if (isInsideEditor) {
-        document.execCommand(command, false);
-
-        if (isInsideEditor instanceof HTMLElement) {
-          // updateProperty("content", isInsideEditor.innerHTML);
-          const cleanHtml = DOMPurify.sanitize(isInsideEditor.innerHTML, SANITIZE_CONFIG);
-          updateProperty("content", cleanHtml);
-        }
-        return true;
-      }
+    const context = getEditorSelectionContext(true);
+    if (context) {
+      document.execCommand(command, false);
+      const cleanHtml = sanitizeHtml(context.editor.innerHTML);
+      updateProperty("content", cleanHtml);
+      return true;
     }
     return false;
   };
@@ -415,16 +554,10 @@ export default function PdfEditorTool() {
   const applyTextColor = (color: string, skipHistory: boolean = false) => {
     if (!state.selectedId) return;
 
-    const selection = window.getSelection();
-    if (selection && !selection.isCollapsed && selection.rangeCount > 0) {
-      const isInsideEditor = selection.anchorNode?.parentElement?.closest('[contenteditable="true"]');
-      if (isInsideEditor) {
-        document.execCommand("foreColor", false, color);
-        if (isInsideEditor instanceof HTMLElement) {
-          updateProperty("content", isInsideEditor.innerHTML, skipHistory);
-        }
-        return;
-      }
+    if (wrapEditorSelection((span) => {
+      span.style.color = color;
+    }, true, skipHistory)) {
+      return;
     }
     updateProperty("color", color, skipHistory);
   };
@@ -518,6 +651,7 @@ export default function PdfEditorTool() {
     if (state.deletedPages.has(actualPageIndex) || actualPageIndex === -1) return;
 
     let isMounted = true;
+
     const extractText = async () => {
       try {
         const blocks = await getPageText(state.fileBuffer!, actualPageIndex, textSelectMode);
@@ -542,16 +676,57 @@ export default function PdfEditorTool() {
     return "Helvetica";
   };
 
+  const isNeutralTextColor = (color?: string | null) => {
+    if (!color || !/^#([0-9a-f]{6})$/i.test(color)) return false;
+    const r = parseInt(color.slice(1, 3), 16);
+    const g = parseInt(color.slice(3, 5), 16);
+    const b = parseInt(color.slice(5, 7), 16);
+    return Math.max(r, g, b) - Math.min(r, g, b) <= 24;
+  };
+
   const handleTextBlockClick = (block: TextItem) => {
+    setHasEditTextInteracted(true);
     const id = Date.now().toString();
     const redactId = `redact-${id}`;
     const groupId = `group-${id}`;
+    const isSingleLineEdit = textSelectMode === "line";
 
-    const shrinkX = block.width * (eraserPaddingX / 100);
-    const shrinkY = block.height * (eraserPaddingY / 100);
-
-    const { bg, palette: scannedPalette, bgPalette } = detectColors(block, canvasRef.current);
-    const exactTextColor = block.color || scannedPalette[0] || "#000000";
+    const { bg, palette: scannedPalette, bgPalette, inkBounds } = detectColors(block, canvasRef.current);
+    const patchSource = inkBounds || block;
+    const maxTrimX = block.width * 0.04;
+    const maxTrimY = block.height * 0.12;
+    const safeLeft = Math.min(patchSource.x, block.x + maxTrimX);
+    const safeRight = Math.max(patchSource.x + patchSource.width, (block.x + block.width) - maxTrimX);
+    const safeTop = Math.min(patchSource.y, block.y + maxTrimY);
+    const safeBottom = Math.max(patchSource.y + patchSource.height, (block.y + block.height) - maxTrimY);
+    const safeWidth = Math.max(0.002, safeRight - safeLeft);
+    const safeHeight = Math.max(0.002, safeBottom - safeTop);
+    const patchBleedX = (Math.min(2, Math.max(1, block.fontSize * state.scale * 0.05))) /
+      Math.max(state.pageSize.width || 1, 1);
+    const patchBleedY = (Math.min(2, Math.max(1, block.fontSize * state.scale * 0.08))) /
+      Math.max(state.pageSize.height || 1, 1);
+    const patchLeft = Math.max(0, safeLeft - patchBleedX);
+    const patchTop = Math.max(0, safeTop - patchBleedY);
+    const patchWidth = Math.min(1 - patchLeft, safeWidth + (patchBleedX * 2));
+    const patchHeight = Math.min(1 - patchTop, safeHeight + (patchBleedY * 2));
+    const editorTop = block.y;
+    const editorBottom = Math.max(block.y + block.height, safeBottom);
+    const editorHeight = isSingleLineEdit
+      ? block.height
+      : Math.max(
+          block.height,
+          (editorBottom - editorTop) + (block.height * 0.18)
+        );
+    const singleLineWidthPadding = Math.max(block.width * 0.06, 0.01);
+    const editorWidth = isSingleLineEdit
+      ? Math.min(1 - block.x, block.width + singleLineWidthPadding)
+      : block.width;
+    const shrinkX = safeWidth * (eraserPaddingX / 100);
+    const shrinkY = safeHeight * (eraserPaddingY / 100);
+    const extractedTextColor = block.color || scannedPalette[0] || "#000000";
+    const exactTextColor = isSingleLineEdit && !isNeutralTextColor(extractedTextColor)
+      ? "#000000"
+      : extractedTextColor;
     const distinctColors = new Set<string>();
     if (block.color) distinctColors.add(block.color);
     scannedPalette.forEach(c => distinctColors.add(c));
@@ -565,15 +740,20 @@ export default function PdfEditorTool() {
       pageIndex: state.currentPage,
 
       // Apply margins
-      x: block.x + (shrinkX / 2),
-      y: block.y + (shrinkY / 2),
-      width: block.width - shrinkX,
-      height: block.height - shrinkY,
+      x: patchLeft + (shrinkX / 2),
+      y: patchTop + (shrinkY / 2),
+      width: Math.max(0.002, patchWidth - shrinkX),
+      height: Math.max(0.002, patchHeight - shrinkY),
 
       color: bg,
       opacity: 1,
       isFill: true,
-      originalBounds: { x: block.x, y: block.y, width: block.width, height: block.height }
+      originalBounds: {
+        x: patchLeft,
+        y: patchTop,
+        width: patchWidth,
+        height: patchHeight,
+      }
     };
 
     // 5. Create Editable Text
@@ -584,15 +764,17 @@ export default function PdfEditorTool() {
       groupId: groupId,
       pageIndex: state.currentPage,
       x: block.x,
-      y: block.y,
-      width: block.width,
-      height: block.height,
+      y: editorTop,
+      width: editorWidth,
+      height: Math.max(0.002, editorHeight),
       content: block.text.replace(/\n/g, "<br/>"),
       color: exactTextColor,
       isBold: block.isBold || false,
       size: block.fontSize,
       font: guessFont(block.fontName),
       opacity: 1,
+      isSingleLine: isSingleLineEdit,
+      lineHeight: block.lineHeight ?? 1.15,
     };
 
     pushHistory({
@@ -738,7 +920,7 @@ export default function PdfEditorTool() {
     }
   }, []);
 
-  const handleWindowMouseUp = useCallback(() => {
+  const handleWindowMouseUp = useCallback(function onWindowMouseUp() {
     if (dragMode.current) {
       if (hasMoved.current) {
         pushHistory({});
@@ -746,7 +928,7 @@ export default function PdfEditorTool() {
       dragMode.current = null;
       hasMoved.current = false;
       window.removeEventListener("mousemove", handleWindowMouseMove);
-      window.removeEventListener("mouseup", handleWindowMouseUp);
+      window.removeEventListener("mouseup", onWindowMouseUp);
     }
   }, [pushHistory, handleWindowMouseMove]);
 
@@ -847,7 +1029,7 @@ export default function PdfEditorTool() {
     // 1. Increment ID to track this specific request
     const reqId = ++loadRequestId.current;
     try {
-      setState(s => ({ ...s, status: "processing" }));
+      setState(s => ({ ...s, status: "loading" }));
       const buf = await readFileToBuffer(f);
       let count = 0;
       try {
@@ -902,10 +1084,10 @@ export default function PdfEditorTool() {
         historyStep: 0,
 
         // Restore User Preferences from LocalStorage
-        savedSignature: localStorage.getItem("nextooly_signature"),
-        savedName: localStorage.getItem("nextooly_name"),
-        savedStamp: localStorage.getItem("nextooly_stamp"),
-        savedQr: localStorage.getItem("nextooly_qr")
+        savedSignature: safeLocalStorage.getItem("nextooly_signature"),
+        savedName: safeLocalStorage.getItem("nextooly_name"),
+        savedStamp: safeLocalStorage.getItem("nextooly_stamp"),
+        savedQr: safeLocalStorage.getItem("nextooly_qr")
       });
 
     } catch (err: any) {
@@ -915,8 +1097,7 @@ export default function PdfEditorTool() {
       // Check for password/encryption errors in the outer scope too
       const isPasswordError = err.message?.toLowerCase().includes("password") ||
         err.message?.toLowerCase().includes("encrypt") ||
-        // Fallback: If it's a "Format Error" or generic load fail, it's often a password issue
-        true;
+        err.message?.toLowerCase().includes("format error");
       if (isPasswordError) {
         setState(s => ({ ...s, status: "idle", showPasswordModal: true }));
       } else {
@@ -977,33 +1158,8 @@ export default function PdfEditorTool() {
       const originalName = state.file?.name.replace(/\.pdf$/i, "") || "document";
       const defaultName = `${originalName}-edited-${Date.now()}.pdf`;
 
-      // 4. Save File (FileSystem Access API)
-      // @ts-ignore - window.showSaveFilePicker is a newer API
-      if (typeof window.showSaveFilePicker === 'function') {
-        try {
-          const handle = await (window as any).showSaveFilePicker({
-            suggestedName: defaultName,
-            types: [{
-              description: 'PDF Document',
-              accept: { 'application/pdf': ['.pdf'] },
-            }],
-          });
-          const writable = await handle.createWritable();
-          await writable.write(pdfBytes);
-          await writable.close();
-          setState(s => ({ ...s, status: "ready" }));
-          return; // Success! Exit function.
-        } catch (err: any) {
-          if (err.name === 'AbortError') {
-            setState(s => ({ ...s, status: "ready" }));
-            return;
-          }
-          console.warn("Save As dialog failed, falling back to standard download.", err);
-        }
-      }
-
-      //Fallback: Standard Download (for browsers without File System API)
-      // const blob = new Blob([pdfBytes], { type: "application/pdf" });
+      // Use a normal browser download so the file lands in the user's default
+      // Downloads location instead of opening a Save As picker each time.
       const blob = new Blob([pdfBytes as any], {
         type: "application/pdf",
       });
@@ -1011,10 +1167,14 @@ export default function PdfEditorTool() {
       const link = document.createElement("a");
       link.href = url;
       link.download = defaultName;
-      document.body.appendChild(link); // Append to DOM to ensure click works in all browsers
+      link.rel = "noopener";
+      link.style.display = "none";
+      document.body.appendChild(link);
       link.click();
-      document.body.removeChild(link); // Clean up
-      URL.revokeObjectURL(url); // Free memory
+      window.setTimeout(() => {
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      }, 30000);
 
       setState(s => ({ ...s, status: "ready" }));
 
@@ -1030,38 +1190,72 @@ export default function PdfEditorTool() {
     const reader = new FileReader();
     reader.onload = (evt) => {
       const result = evt.target?.result as string;
-      localStorage.setItem("nextooly_qr", result);
+      safeLocalStorage.setItem("nextooly_qr", result);
       setState(s => ({ ...s, savedQr: result, tool: "qr_drop" }));
     };
     reader.readAsDataURL(f);
     e.target.value = "";
   };
 
+  const applyAnnotationFontSize = (value: number) => {
+    if (!state.selectedId) return;
+    const master = state.annotations.find(a => a.id === state.selectedId);
+    if (!master) return;
+    const nextSize = Math.max(1, Math.round(value * 10) / 10);
+    const next = state.annotations.map(a => {
+      const isMatch = a.id === state.selectedId;
+      const isGroupMatch = master.groupId && a.groupId === master.groupId;
+      return (isMatch || isGroupMatch) ? { ...a, size: nextSize } : a;
+    });
+    pushHistory({ annotations: next });
+    setFontSizeInputValue(formatFontSizeValue(nextSize));
+  };
+
+  const commitFontSizeInput = () => {
+    if (!selectedAnn) return;
+    const parsedValue = parseFloat(fontSizeInputValue);
+    if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+      setFontSizeInputValue(formatFontSizeValue(selectedAnn.size ?? 16));
+      return;
+    }
+
+    const roundedValue = Math.round(parsedValue * 10) / 10;
+    const selectedTextSize = (selectedAnn.type === "text" || selectedAnn.type === "text_edit")
+      ? getSelectedTextPointSize(true)
+      : null;
+
+    if (selectedTextSize) {
+      if (Math.abs(selectedTextSize - roundedValue) > 0.05) {
+        const ratio = roundedValue / selectedTextSize;
+        if (applyRelativeFontSize(ratio, true)) {
+          setFontSizeInputValue(formatFontSizeValue(roundedValue));
+        }
+      } else {
+        setFontSizeInputValue(formatFontSizeValue(roundedValue));
+      }
+      return;
+    }
+
+    if (Math.abs((selectedAnn.size ?? 16) - roundedValue) > 0.05) {
+      applyAnnotationFontSize(roundedValue);
+      return;
+    }
+
+    setFontSizeInputValue(formatFontSizeValue(roundedValue));
+  };
+
   const adjustFontSize = (delta: number) => {
     if (!state.selectedId) return;
 
-    const selection = window.getSelection();
-    if (selection && !selection.isCollapsed && selection.rangeCount > 0) {
-      const isInsideEditor = selection.anchorNode?.parentElement?.closest('[contenteditable="true"]');
-      if (isInsideEditor) {
-        handleSelectionPointChange(delta);
-        return;
-      }
+    const selectedTextSize = getSelectedTextPointSize(true);
+    if (selectedTextSize) {
+      handleSelectionPointChange(delta);
+      return;
     }
 
     const master = state.annotations.find(a => a.id === state.selectedId);
     if (!master) return;
-    const next = state.annotations.map(a => {
-      const isMatch = a.id === state.selectedId;
-      const isGroupMatch = master.groupId && a.groupId === master.groupId;
-      if (isMatch || isGroupMatch) {
-        // FIX: Round to 1 decimal place
-        const newSize = Math.max(1, Math.round(((a.size || 16) + delta) * 10) / 10);
-        return { ...a, size: newSize };
-      }
-      return a;
-    });
-    pushHistory({ annotations: next });
+    applyAnnotationFontSize((master.size || 16) + delta);
   };
 
   const rotatePage = (index: number) => {
@@ -1078,7 +1272,16 @@ export default function PdfEditorTool() {
     const originalIdx = state.pageOrder[index];
     if (originalIdx === -1) {
       const newOrder = state.pageOrder.filter((_, i) => i !== index);
-      pushHistory({ pageOrder: newOrder });
+      const newAnnotations = removeBlankPageAnnotations(state.annotations, index);
+      const nextCurrentPage = newOrder.length === 0
+        ? 0
+        : state.currentPage === index
+          ? Math.max(0, Math.min(index, newOrder.length - 1))
+          : state.currentPage > index
+            ? state.currentPage - 1
+            : state.currentPage;
+      pushHistory({ pageOrder: newOrder, annotations: newAnnotations });
+      setState(s => ({ ...s, currentPage: nextCurrentPage, selectedId: s.selectedId && newAnnotations.some(a => a.id === s.selectedId) ? s.selectedId : null }));
       return;
     }
     const newDeleted = new Set(state.deletedPages);
@@ -1093,22 +1296,9 @@ export default function PdfEditorTool() {
     pushHistory({ deletedPages: Array.from(newDeleted) });
   };
 
-  const movePage = (fromVisualIndex: number, direction: 'left' | 'right') => {
+  const movePage = (fromRealIndex: number, direction: 'left' | 'right') => {
     const newOrder = [...state.pageOrder];
-    let visibleCount = -1;
-    let realFromIndex = -1;
-    for (let i = 0; i < newOrder.length; i++) {
-      if (!state.deletedPages.has(newOrder[i])) {
-        visibleCount++;
-      }
-      if (visibleCount === fromVisualIndex) {
-        realFromIndex = i;
-        break;
-      }
-    }
-
-    if (realFromIndex === -1) return;
-    let targetIndex = realFromIndex;
+    let targetIndex = fromRealIndex;
     if (direction === 'left') {
       targetIndex--;
       while (targetIndex >= 0 && state.deletedPages.has(newOrder[targetIndex])) {
@@ -1122,11 +1312,34 @@ export default function PdfEditorTool() {
     }
 
     if (targetIndex >= 0 && targetIndex < newOrder.length) {
-      const temp = newOrder[realFromIndex];
-      newOrder[realFromIndex] = newOrder[targetIndex];
+      const temp = newOrder[fromRealIndex];
+      newOrder[fromRealIndex] = newOrder[targetIndex];
       newOrder[targetIndex] = temp;
-      pushHistory({ pageOrder: newOrder });
+      const newAnnotations = swapAnnotationPages(state.annotations, fromRealIndex, targetIndex);
+      const nextCurrentPage = state.currentPage === fromRealIndex
+        ? targetIndex
+        : state.currentPage === targetIndex
+          ? fromRealIndex
+          : state.currentPage;
+      pushHistory({ pageOrder: newOrder, annotations: newAnnotations });
+      setState(s => ({ ...s, currentPage: nextCurrentPage }));
     }
+  };
+
+  const canMovePage = (fromRealIndex: number, direction: 'left' | 'right') => {
+    let targetIndex = fromRealIndex;
+    if (direction === 'left') {
+      targetIndex--;
+      while (targetIndex >= 0 && state.deletedPages.has(state.pageOrder[targetIndex])) {
+        targetIndex--;
+      }
+    } else {
+      targetIndex++;
+      while (targetIndex < state.pageOrder.length && state.deletedPages.has(state.pageOrder[targetIndex])) {
+        targetIndex++;
+      }
+    }
+    return targetIndex >= 0 && targetIndex < state.pageOrder.length;
   };
 
   const addBlankPage = () => {
@@ -1134,17 +1347,66 @@ export default function PdfEditorTool() {
     pushHistory({ pageOrder: newOrder });
   };
 
+  const handleReset = () => {
+    setConfirmDialogConfig({
+      message: "Reset the editor? All unsaved changes will be lost.",
+      confirmLabel: "Reset",
+      onConfirm: () => {
+        // Reset main state
+        setState({ ...INITIAL_STATE, pdfFormFields: [] });
+        // Reset all sibling state
+        setActiveDropdown(null);
+        setBottomBarExpanded(true);
+        setTextSelectMode("line");
+        setEraserPaddingX(0);
+        setEraserPaddingY(0);
+        setGridLoading(false);
+        setIsDragOver(false);
+        setHasEditTextInteracted(false);
+        // Reset logic refs
+        isDrawing.current = false;
+        drawingAnnId.current = null;
+        dragMode.current = null;
+        dragStart.current = null;
+        hasMoved.current = false;
+        // Scroll back to top
+        if (scrollAreaRef.current) scrollAreaRef.current.scrollTop = 0;
+        setConfirmDialogConfig(null);
+      },
+    });
+  };
+
   return (
     <>
       <div className="tool-container">
+        {/* ── UPLOAD SCREEN ── */}
         {state.status === "idle" && (
           <div className="w-full flex items-center justify-center p-10 bg-slate-50 flex-1">
-            <div className="dropzone" onClick={() => fileInputRef.current?.click()}>
+            <div
+              className={`dropzone${isDragOver ? " drag-over" : ""}`}
+              onClick={() => fileInputRef.current?.click()}
+              onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
+              onDragLeave={() => setIsDragOver(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setIsDragOver(false);
+                const f = e.dataTransfer.files?.[0];
+                if (f && f.type === "application/pdf") handleFile(f);
+              }}
+              role="button"
+              aria-label="Upload PDF file"
+              tabIndex={0}
+              onKeyDown={(e) => e.key === "Enter" && fileInputRef.current?.click()}
+            >
               <div className="text-blue-500 mx-auto w-12 h-12 mb-4"><Icons.Upload /></div>
-              <h3 className="text-xl font-bold text-gray-800">Upload PDF to Edit</h3>
-              <p className="text-gray-500 mt-2 font-medium">Secure, browser-based editing</p>
+              <h2 className="text-xl font-bold text-gray-800">
+                {isDragOver ? "Drop your PDF here" : "Upload PDF to Edit"}
+              </h2>
+              <p className="text-gray-500 mt-2 font-medium text-sm">
+                Drag &amp; drop or click to select &mdash; files never leave your device
+              </p>
               <div className="mobile-upload-msg">
-                <span className="text-lg mr-1">💻</span> We recommend using a <b>Desktop</b> for the best editing experience.
+                <span>💻</span> We recommend a <b>Desktop</b> for the best editing experience.
               </div>
               <input ref={fileInputRef} type="file" accept="application/pdf" hidden onChange={(e) => {
                 const file = e.target.files?.[0];
@@ -1154,11 +1416,22 @@ export default function PdfEditorTool() {
           </div>
         )}
 
-        {state.status !== "idle" && (
+        {/* ── PDF LOADING STATE ── */}
+        {state.status === "loading" && (
+          <div className="w-full flex-1 pdf-loading-state">
+            <div className="spinner" />
+            <span>Loading PDF…</span>
+          </div>
+        )}
+
+        {(state.status === "ready" || state.status === "processing") && (
           <>
-            {/* --- TOP TOOLBAR --- */}
+            {/* ── TOP TOOLBAR ── */}
             <div className="top-nav" ref={dropdownRef}>
               <div className="nav-brand">PDF Editor</div>
+              {state.file && (
+                <span className="nav-filename" title={state.file.name}>{state.file.name}</span>
+              )}
               {/* 1. Main Tools Loop (Optimized) */}
               {TOOLBAR_CONFIG.map(item => (
                 <button
@@ -1167,16 +1440,19 @@ export default function PdfEditorTool() {
                   onClick={() => setState(s => ({ ...s, tool: item.id as any, ...(item.color ? { color: item.color } : {}) }))}
                   title={item.title || item.label}
                 >
-                  <item.icon /> {item.label && ` ${item.label}`}
+                  <item.icon />
+                  {item.label && <span className="nav-label">{item.label}</span>}
                 </button>
               ))}
 
-              {/* Info Button (Kept Separate) */}
+              {/* Info Button */}
               <button
                 className="nav-btn"
                 onClick={() => setState(s => ({ ...s, showMetadataModal: true }))}
+                title="View and edit document properties"
               >
-                <Icons.Info /> Info
+                <Icons.Info />
+                <span className="nav-label">Info</span>
               </button>
 
               <div className="nav-divider" />
@@ -1187,7 +1463,9 @@ export default function PdfEditorTool() {
                   className={`nav-btn ${["rect", "circle", "line", "arrow", "draw"].includes(state.tool) ? "active" : ""}`}
                   onClick={() => setActiveDropdown(activeDropdown === "shapes" ? null : "shapes")}
                 >
-                  <Icons.Shapes /> Shapes <Icons.ChevronDown />
+                  <Icons.Shapes />
+                  <span className="nav-label">Shapes</span>
+                  <Icons.ChevronDown />
                 </button>
 
                 {activeDropdown === "shapes" && (
@@ -1222,7 +1500,9 @@ export default function PdfEditorTool() {
                   className={`nav-btn ${["image", "stamp_drop", "qr_drop"].includes(state.tool) ? "active" : ""}`}
                   onClick={() => setActiveDropdown(activeDropdown === "insert" ? null : "insert")}
                 >
-                  <Icons.Insert /> Insert <Icons.ChevronDown />
+                  <Icons.Insert />
+                  <span className="nav-label">Insert</span>
+                  <Icons.ChevronDown />
                 </button>
                 {activeDropdown === "insert" && (
                   <div className="nav-dropdown-menu" style={{ width: '220px' }}> {/* Slightly wider for the icon */}
@@ -1341,29 +1621,10 @@ export default function PdfEditorTool() {
                 <input ref={qrFileRef} type="file" accept="image/*" hidden onChange={handleQrUpload} />
               </div>
 
-              {/* Sign Button */}
-              <div style={{
-                display: 'flex',
-                flexDirection: 'row',
-                alignItems: 'center',
-                backgroundColor: 'rgba(255, 255, 255, 0.1)',
-                borderRadius: '6px',
-                marginLeft: '8px',
-                border: '1px solid rgba(255,255,255,0.1)' // Subtle border for definition
-              }}>
-
-                {/* PART 1: MAIN ACTION (Sign) */}
+              {/* Sign split button */}
+              <div className="sign-btn-group">
                 <button
-                  className="nav-btn"
-                  style={{
-                    margin: 0,
-                    borderTopRightRadius: 0,
-                    borderBottomRightRadius: 0,
-                    borderRight: '1px solid rgba(255, 255, 255, 0.2)', // Separator line
-                    paddingRight: '10px',
-                    background: state.tool === "signature_drop" ? "rgba(59, 130, 246, 0.3)" : "transparent",
-                    color: state.tool === "signature_drop" ? "#bfdbfe" : "inherit"
-                  }}
+                  className={`nav-btn sign-btn-main${state.tool === "signature_drop" ? " active" : ""}`}
                   onClick={() => {
                     if (state.savedSignature) {
                       setState(s => ({ ...s, tool: "signature_drop", editingId: null }));
@@ -1371,32 +1632,17 @@ export default function PdfEditorTool() {
                       setState(s => ({ ...s, showSignatureModal: true, editingId: null }));
                     }
                   }}
-                  title={state.savedSignature ? "Click to place saved signature" : "Click to create signature"}
+                  title={state.savedSignature ? "Place saved signature (Ctrl+click to reconfigure)" : "Create a signature"}
                 >
-                  <Icons.Signature /> Sign
+                  <Icons.Signature />
+                  <span className="nav-label">Sign</span>
                 </button>
-
-                {/* PART 2: EDIT ICON (Always Visible) */}
                 <button
-                  className="nav-btn"
-                  style={{
-                    margin: 0,
-                    borderTopLeftRadius: 0,
-                    borderBottomLeftRadius: 0,
-                    paddingLeft: '6px',
-                    paddingRight: '6px',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center'
-                  }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setState(s => ({ ...s, showSignatureModal: true, editingId: null }));
-                  }}
-                  title="Configure / Change Signature"
+                  className="nav-btn sign-btn-edit"
+                  onClick={(e) => { e.stopPropagation(); setState(s => ({ ...s, showSignatureModal: true, editingId: null })); }}
+                  title="Change / reconfigure signature"
                 >
-                  {/* Using the Edit Pencil icon similar to your screenshot */}
-                  <div style={{ transform: 'scale(0.85)' }}><Icons.Edit /></div>
+                  <Icons.Edit />
                 </button>
               </div>
 
@@ -1405,8 +1651,10 @@ export default function PdfEditorTool() {
                   className="nav-btn nav-btn-primary"
                   onClick={handleSave}
                   disabled={state.status === "processing"}
+                  title="Save edited PDF (download)"
                 >
-                  <Icons.Download /> {state.status === "processing" ? "Saving..." : "Save"}
+                  <Icons.Download />
+                  <span className="nav-label">{state.status === "processing" ? "Downloading..." : "Download"}</span>
                 </button>
               </div>
             </div>
@@ -1423,11 +1671,49 @@ export default function PdfEditorTool() {
                           {AVAILABLE_FONTS.map((f) => (<option key={f.value} value={f.value}>{f.name}</option>))}
                         </select>
 
-                        {/* Font Size */}
+                        {/* Font Size — typeable + stepped */}
                         <div className="flex items-center border border-slate-300 rounded overflow-hidden bg-white shrink-0">
-                          <button className="px-1 py-1 hover:bg-slate-100 border-r border-slate-300" onClick={() => adjustFontSize(-0.1)}><Icons.Minus /></button>
-                          <span className="w-8 text-xs font-medium text-center">{selectedAnn.size}</span>
-                          <button className="px-1 py-1 hover:bg-slate-100 border-l border-slate-300" onClick={() => adjustFontSize(0.1)}><Icons.Plus /></button>
+                          <button
+                            className="px-1 py-1 hover:bg-slate-100 border-r border-slate-300"
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              adjustFontSize(-1);
+                            }}
+                            title="Decrease font size"
+                          >
+                            <Icons.Minus />
+                          </button>
+                          <input
+                            type="number"
+                            className="font-size-input"
+                            value={fontSizeInputValue}
+                            min={1}
+                            max={200}
+                            step={0.1}
+                            title="Font size"
+                            onChange={(e) => {
+                              setFontSizeInputValue(e.target.value);
+                            }}
+                            onBlur={commitFontSizeInput}
+                            onKeyDown={(e) => {
+                              e.stopPropagation();
+                              if (e.key === "Enter") {
+                                commitFontSizeInput();
+                                (e.target as HTMLInputElement).blur();
+                              }
+                            }}
+                            onClick={(e) => (e.target as HTMLInputElement).select()}
+                          />
+                          <button
+                            className="px-1 py-1 hover:bg-slate-100 border-l border-slate-300"
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              adjustFontSize(1);
+                            }}
+                            title="Increase font size"
+                          >
+                            <Icons.Plus />
+                          </button>
                         </div>
 
                         {/* Bold / Italic / Underline */}
@@ -1450,7 +1736,9 @@ export default function PdfEditorTool() {
                             type="color"
                             className="w-6 h-6 rounded cursor-pointer border border-slate-300 p-0 bg-white"
                             value={selectedAnn.color}
-                            // CHANGE: Use applyTextColor instead of updateProperty
+                            onMouseDown={() => {
+                              getEditorSelectionContext(false);
+                            }}
                             onChange={(e) => applyTextColor(e.target.value, true)}
                             onBlur={() => pushHistory()}
                           />
@@ -1622,7 +1910,7 @@ export default function PdfEditorTool() {
                         });
                         pushHistory({ annotations: next });
                         setState(s => ({ ...s, selectedId: null }));
-                      }} title="Delete"><Icons.Trash /></button>
+                      }} title="Delete (Del / Backspace)"><Icons.Trash /></button>
                     </>
                     {!(selectedAnn.type === "path" && selectedAnn.color === "#ffffff") && selectedAnn.subtype !== "editor" && (
                       <button
@@ -1680,18 +1968,23 @@ export default function PdfEditorTool() {
                               className="hover:bg-slate-100 text-slate-600 transition-colors"
                               style={{ padding: "6px 8px", borderRight: "1px solid #cbd5e1", borderRadius: "4px 0 0 4px", display: "flex" }}
                               onClick={() => {
-                                let name = localStorage.getItem("nextooly_name");
-                                if (!name) {
-                                  name = prompt("Enter your name for quick use:");
-                                  if (name) {
-                                    localStorage.setItem("nextooly_name", name);
-                                    setState(s => ({ ...s, savedName: name }));
-                                  } else return;
+                                const existingName = safeLocalStorage.getItem("nextooly_name");
+                                const applyName = (name: string) => {
+                                  safeLocalStorage.setItem("nextooly_name", name);
+                                  setState(s => ({ ...s, savedName: name }));
+                                  const next = state.annotations.map(a => a.id === selectedAnn.id ? { ...a, content: name } : a);
+                                  pushHistory({ annotations: next });
+                                  setState(s => ({ ...s, annotations: next, selectedId: null }));
+                                };
+                                if (existingName) {
+                                  applyName(existingName);
+                                } else {
+                                  setPromptDialogConfig({
+                                    message: "Enter your name to insert:",
+                                    placeholder: "Your name",
+                                    onConfirm: applyName,
+                                  });
                                 }
-                                // Apply & Deselect
-                                const next = state.annotations.map(a => a.id === selectedAnn.id ? { ...a, content: name! } : a);
-                                pushHistory({ annotations: next });
-                                setState(s => ({ ...s, annotations: next, selectedId: null }));
                               }}
                               title={state.savedName ? `Insert "${state.savedName}"` : "Insert Name"}
                             >
@@ -1703,12 +1996,15 @@ export default function PdfEditorTool() {
                               className="hover:bg-slate-100 text-slate-500 transition-colors"
                               style={{ padding: "6px 4px", borderRadius: "0 4px 4px 0", display: "flex" }}
                               onClick={() => {
-                                const current = localStorage.getItem("nextooly_name") || "";
-                                const newName = prompt("Change your saved name:", current);
-                                if (newName) {
-                                  localStorage.setItem("nextooly_name", newName);
-                                  setState(s => ({ ...s, savedName: newName }));
-                                }
+                                setPromptDialogConfig({
+                                  message: "Update your saved name:",
+                                  defaultValue: safeLocalStorage.getItem("nextooly_name") || "",
+                                  placeholder: "Your name",
+                                  onConfirm: (newName) => {
+                                    safeLocalStorage.setItem("nextooly_name", newName);
+                                    setState(s => ({ ...s, savedName: newName }));
+                                  },
+                                });
                               }}
                               title="Update Saved Name"
                             >
@@ -1772,49 +2068,47 @@ export default function PdfEditorTool() {
                 ) : (
                   state.tool === "edit_text" ? (
                     <div className="flex items-center gap-3">
-                      <EditTextContextBar mode={textSelectMode} setMode={setTextSelectMode} />
+                      <EditTextContextBar mode={textSelectMode} setMode={setTextSelectMode} hasInteracted={hasEditTextInteracted} />
                       <div className="w-px h-5 bg-slate-300 mx-2" />
-                      <div className="flex items-center gap-1" title="Horizontal Shrink (Left/Right)">
-                        <span className="text-xs font-bold text-slate-400">↔</span>
+                      <div className="flex items-center gap-1.5" title="Shrink selection box inward horizontally (reduces whitespace captured on left/right)">
+                        <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">H-trim</span>
                         <input
                           type="range" min="0" max="30" step="1"
-                          className="w-12 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer"
+                          className="w-14 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer"
                           value={eraserPaddingX}
                           onChange={(e) => setEraserPaddingX(parseInt(e.target.value))}
                         />
-                        <span className="text-[10px] text-slate-600 w-4 font-mono">{eraserPaddingX}%</span>
+                        <span className="text-[10px] text-slate-500 w-5 font-mono">{eraserPaddingX}%</span>
                       </div>
-
-                      {/* Vertical (Y) */}
-                      <div className="flex items-center gap-1" title="Vertical Shrink (Top/Bottom)">
-                        <span className="text-xs font-bold text-slate-400">↕</span>
+                      <div className="flex items-center gap-1.5" title="Shrink selection box inward vertically (reduces whitespace captured on top/bottom)">
+                        <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">V-trim</span>
                         <input
                           type="range" min="0" max="40" step="2"
-                          className="w-12 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer"
+                          className="w-14 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer"
                           value={eraserPaddingY}
                           onChange={(e) => setEraserPaddingY(parseInt(e.target.value))}
                         />
-                        <span className="text-[10px] text-slate-600 w-4 font-mono">{eraserPaddingY}%</span>
+                        <span className="text-[10px] text-slate-500 w-5 font-mono">{eraserPaddingY}%</span>
                       </div>
                     </div>
                   ) : (
-                    <span className="text-slate-400 text-sm">Select an item to edit properties</span>
+                    <span className="text-slate-400 text-xs select-none">
+                    {state.tool === "cursor"
+                      ? "Click an annotation to select it — then edit its properties here"
+                      : state.tool === "text"
+                      ? "Click anywhere on the page to place a text box"
+                      : state.tool === "redact"
+                      ? "Click and drag on the page to redact an area"
+                      : "Use the canvas to draw"}
+                  </span>
                   )
                 )}
 
-                {/* --- UNDO/REDO (Always Visible) --- */}
+                {/* Undo / Redo / Reset */}
                 <div className="ml-auto flex items-center gap-1 pl-4 border-l border-slate-200">
-                  <button className="top-action-btn" onClick={undo} disabled={state.historyStep === 0}><Icons.Undo /></button>
-                  <button className="top-action-btn" onClick={redo} disabled={state.historyStep >= state.history.length - 1}><Icons.Redo /></button>
-                  <button
-                    className="text-xs font-bold text-red-600 bg-red-50 border border-red-100 px-3 py-1.5 rounded ml-2 transition-colors hover:bg-red-100"
-                    onClick={() => {
-                      if (confirm("Are you sure you want to reset? All unsaved changes will be lost.")) {
-                        window.location.reload();
-                      }
-                    }}
-                    title="Reset Document"
-                  >
+                  <button className="top-action-btn" onClick={undo} disabled={state.historyStep === 0} title="Undo (Ctrl+Z)"><Icons.Undo /></button>
+                  <button className="top-action-btn" onClick={redo} disabled={state.historyStep >= state.history.length - 1} title="Redo (Ctrl+Shift+Z)"><Icons.Redo /></button>
+                  <button className="reset-btn" onClick={handleReset} title="Discard all changes and start over">
                     Reset
                   </button>
                 </div>
@@ -2125,14 +2419,16 @@ export default function PdfEditorTool() {
                                 htmlContent={ann.content || ""}
                                 className={getFontClass(ann.font)}
                                 onChange={(newHtml) => {
+                                  const cleanHtml = sanitizeHtml(newHtml);
                                   setState(s => ({
                                     ...s,
                                     annotations: s.annotations.map(a =>
-                                      a.id === ann.id ? { ...a, content: newHtml } : a
+                                      a.id === ann.id ? { ...a, content: cleanHtml } : a
                                     )
                                   }));
                                 }}
-                                isSelected={isSel}
+                                autoFocus={isSel}
+                                sanitizeHtml={sanitizeHtml}
                                 style={{
                                   width: "100%",
                                   height: "100%",
@@ -2146,9 +2442,9 @@ export default function PdfEditorTool() {
                                   border: "none",
                                   padding: "0",
                                   margin: "0",
-                                  overflow: "hidden",
-                                  whiteSpace: "pre-wrap",
-                                  wordBreak: "break-word",
+                                  overflow: ann.isSingleLine ? "hidden" : "auto",
+                                  whiteSpace: ann.isSingleLine ? "pre" : "pre-wrap",
+                                  wordBreak: ann.isSingleLine ? "normal" : "break-word",
                                   fontWeight: ann.isBold ? 'bold' : 'normal',
                                   fontStyle: ann.isItalic ? 'italic' : 'normal',
                                   textDecoration: ann.isUnderline ? 'underline' : 'none',
@@ -2245,14 +2541,15 @@ export default function PdfEditorTool() {
                               htmlContent={ann.content || ""}
                               className={getFontClass(ann.font)}
                               onChange={(newHtml) => {
+                                const cleanHtml = sanitizeHtml(newHtml);
                                 setState(s => ({
                                   ...s,
                                   annotations: s.annotations.map(a =>
-                                    a.id === ann.id ? { ...a, content: newHtml } : a
+                                    a.id === ann.id ? { ...a, content: cleanHtml } : a
                                   )
                                 }));
                               }}
-                              isSelected={isSel}
+                              sanitizeHtml={sanitizeHtml}
                               style={{
                                 width: "100%",
                                 height: "100%",
@@ -2442,10 +2739,10 @@ export default function PdfEditorTool() {
                                 <div className="flex items-center gap-1">
                                   <button
                                     className="move-btn"
-                                    disabled={visualIndex === 0}
+                                    disabled={!canMovePage(item.realIndex, 'left')}
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      handlePageOperation(() => movePage(visualIndex, 'left'));
+                                      handlePageOperation(() => movePage(item.realIndex, 'left'));
                                     }}
                                     title="Move Backward"
                                   >
@@ -2453,10 +2750,10 @@ export default function PdfEditorTool() {
                                   </button>
                                   <button
                                     className="move-btn"
-                                    disabled={visualIndex === array.length - 1}
+                                    disabled={!canMovePage(item.realIndex, 'right')}
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      handlePageOperation(() => movePage(visualIndex, 'right'));
+                                      handlePageOperation(() => movePage(item.realIndex, 'right'));
                                     }}
                                     title="Move Forward"
                                   >
@@ -2514,7 +2811,7 @@ export default function PdfEditorTool() {
               <SignatureModal
                 onClose={() => setState(s => ({ ...s, showSignatureModal: false }))}
                 onSave={(url) => {
-                  localStorage.setItem("nextooly_signature", url);
+                  safeLocalStorage.setItem("nextooly_signature", url);
                   if (state.editingId) {
                     const next = state.annotations.map(a => a.id === state.editingId ? { ...a, content: url } : a);
                     pushHistory({ annotations: next });
@@ -2534,7 +2831,7 @@ export default function PdfEditorTool() {
                 savedQr={state.savedQr}
                 onClose={() => setState(s => ({ ...s, showQrModal: false }))}
                 onSave={(url, text) => {
-                  localStorage.setItem("nextooly_qr", url);
+                  safeLocalStorage.setItem("nextooly_qr", url);
                   if (state.editingId) {
                     const next = state.annotations.map(a => a.id === state.editingId ? {
                       ...a,
@@ -2557,7 +2854,7 @@ export default function PdfEditorTool() {
                 savedStamp={state.savedStamp}
                 onClose={() => setState(s => ({ ...s, showStampModal: false }))}
                 onSave={(url) => {
-                  localStorage.setItem("nextooly_stamp", url);
+                  safeLocalStorage.setItem("nextooly_stamp", url);
                   if (state.editingId) {
                     const next = state.annotations.map(a => a.id === state.editingId ? { ...a, content: url } : a);
                     pushHistory({ annotations: next });
@@ -2569,6 +2866,27 @@ export default function PdfEditorTool() {
               />
             )}
           </>
+        )}
+
+        {/* ── Confirm Dialog ── */}
+        {confirmDialogConfig && (
+          <ConfirmDialog
+            message={confirmDialogConfig.message}
+            confirmLabel={confirmDialogConfig.confirmLabel}
+            onConfirm={confirmDialogConfig.onConfirm}
+            onCancel={() => setConfirmDialogConfig(null)}
+          />
+        )}
+
+        {/* ── Prompt Dialog ── */}
+        {promptDialogConfig && (
+          <PromptDialog
+            message={promptDialogConfig.message}
+            defaultValue={promptDialogConfig.defaultValue}
+            placeholder={promptDialogConfig.placeholder}
+            onConfirm={(val) => { promptDialogConfig.onConfirm(val); setPromptDialogConfig(null); }}
+            onCancel={() => setPromptDialogConfig(null)}
+          />
         )}
 
         {state.showPasswordModal && (

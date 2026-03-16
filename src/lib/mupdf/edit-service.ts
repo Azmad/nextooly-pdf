@@ -395,146 +395,183 @@ export async function getPageText(
 ): Promise<TextItem[]> {
   const mupdf = await loadMuPDF();
   const doc = mupdf.PDFDocument.openDocument(fileBuffer, "application/pdf");
+  let page: any = null;
+  let structuredText: any = null;
 
   try {
-    const page = doc.loadPage(pageIndex);
+    page = doc.loadPage(pageIndex);
     const bounds = page.getBounds();
     const pageWidth = bounds[2] - bounds[0];
     const pageHeight = bounds[3] - bounds[1];
 
-    let structuredText = page.toStructuredText();
+    structuredText = page.toStructuredText();
     let data: any;
-
-    if (structuredText && typeof structuredText.asJSON === 'function') {
-      try { data = JSON.parse(structuredText.asJSON()); } catch (e) { return []; }
+    if (structuredText && typeof structuredText.asJSON === "function") {
+      try { data = JSON.parse(structuredText.asJSON()); } catch { return []; }
     } else {
       data = structuredText;
     }
     if (!data || !data.blocks) return [];
+
+    // Normalise raw PDF coords into [0,1] page-relative space
+    const normX = (v: number) => (v - bounds[0]) / pageWidth;
+    const normY = (v: number) => (v - bounds[1]) / pageHeight;
+    const normW = (v: number) => v / pageWidth;
+    const normH = (v: number) => v / pageHeight;
+
+    // Parse bbox from either array [x1,y1,x2,y2] or object {x,y,w,h} forms
+    const getBbox = (obj: any): { x: number; y: number; w: number; h: number } | null => {
+      if (!obj?.bbox) return null;
+      if (Array.isArray(obj.bbox)) {
+        return { x: obj.bbox[0], y: obj.bbox[1], w: obj.bbox[2] - obj.bbox[0], h: obj.bbox[3] - obj.bbox[1] };
+      }
+      return { x: obj.bbox.x, y: obj.bbox.y, w: obj.bbox.w, h: obj.bbox.h };
+    };
+
     const textItems: TextItem[] = [];
+
     for (const block of data.blocks) {
-      if (!block.lines || !Array.isArray(block.lines) || block.lines.length === 0) continue;
-      const processedLines = block.lines.map((line: any) => {
-        if (!line.text || !line.text.trim()) return null;
-
-        let lx = 0, ly = 0, lw = 0, lh = 0;
-        if (line.bbox) {
-          if (Array.isArray(line.bbox)) {
-            lx = line.bbox[0]; ly = line.bbox[1]; lw = line.bbox[2] - line.bbox[0]; lh = line.bbox[3] - line.bbox[1];
-          } else {
-            lx = line.bbox.x; ly = line.bbox.y; lw = line.bbox.w; lh = line.bbox.h;
-          }
-        }
-
-        const fontSize = line.font?.size || 12;
-        const tightHeight = fontSize * 1.45;
-        const verticalCorrection = fontSize * 0.15;
-        const originalCenterY = ly + (lh / 2);
-        const tightY = originalCenterY - (tightHeight / 2) + verticalCorrection;
-
-        return {
-          ...line,
-          lx,
-          ly: tightY,        // Updated Y position
-          lw,
-          lh: tightHeight,   // Updated Height
-          fontSize
-        };
-      }).filter((l: any) => l !== null);
-
-      if (processedLines.length === 0) continue;
+      if (!Array.isArray(block.lines) || block.lines.length === 0) continue;
 
       if (mode === "line") {
-        for (const line of processedLines) {
-          const finalX = (line.lx - bounds[0]) / pageWidth;
-          const finalY = (line.ly - bounds[1]) / pageHeight;
-          const finalW = line.lw / pageWidth;
-          const finalH = line.lh / pageHeight;
+        // ── LINE MODE: one TextItem per MuPDF line ──
+        for (const line of block.lines) {
+          const lineText: string = line.text ?? "";
+          if (!lineText.trim()) continue;
 
-          const fontName = line.font?.name || "Helvetica";
+          const bb = getBbox(line);
+          if (!bb || bb.w <= 0) continue;
+
+          const fontSize: number = line.font?.size ?? 12;
+          // Restore the older line-mode box geometry that behaved better for
+          // live editing. It gives the line box a consistent amount of headroom
+          // and descender space instead of trimming too aggressively.
+          const tightH = fontSize * 1.45;
+          const verticalCorrection = fontSize * 0.15;
+          const originalCenterY = bb.y + (bb.h / 2);
+          const tightY = originalCenterY - (tightH / 2) + verticalCorrection;
+          const fontName: string = line.font?.name ?? "Helvetica";
+          const isBold = fontName.toLowerCase().includes("bold") || fontName.toLowerCase().includes("black");
           const color = toHexColor(line.color);
-          const lower = (fontName || "").toLowerCase();
-          const isBold = lower.includes("bold") || lower.includes("black");
 
           textItems.push({
-            text: line.text,
-            x: finalX,
-            y: finalY,
-            width: finalW,
-            height: finalH,
-            fontSize: line.fontSize,
-            fontName: fontName,
-            color: color,
-            isBold: isBold,
-            lineHeight: 1.15 // Keep editor text spacing normal
+            text: lineText.trimEnd(),
+            x: normX(bb.x),
+            y: normY(tightY),
+            width: normW(bb.w),
+            height: normH(tightH),
+            fontSize,
+            fontName,
+            color,
+            isBold,
+            lineHeight: 1.15,
           });
         }
-      }
-      // --- MODE: BLOCK (Aggregate tight lines) ---
-      else {
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        let fullText = "";
-        let dominantFontName = "";
-        let dominantFontSize = 0;
-        let dominantColor: any = undefined;
-        let isBold = false;
+      } else {
+        // ── BLOCK MODE: split MuPDF block on large vertical gaps ──
+        // Collect valid lines with their bboxes first
+        interface LineData {
+          text: string; bb: { x: number; y: number; w: number; h: number };
+          fontSize: number; fontName: string; color: string | null;
+        }
+        const validLines: LineData[] = [];
+        for (const line of block.lines) {
+          const lineText: string = line.text ?? "";
+          if (!lineText.trim()) continue;
+          const bb = getBbox(line);
+          if (!bb) continue;
+          validLines.push({
+            text: lineText,
+            bb,
+            fontSize: line.font?.size ?? 12,
+            fontName: line.font?.name ?? "Helvetica",
+            color: line.color != null ? toHexColor(line.color) : null,
+          });
+        }
+        if (validLines.length === 0) continue;
 
-        let firstLineY = 0;
-        let lastLineY = 0;
-        for (let i = 0; i < processedLines.length; i++) {
-          const line = processedLines[i];
-          fullText += (i === 0 ? "" : "\n") + line.text;
-
-          // Union the TIGHT boxes
-          minX = Math.min(minX, line.lx);
-          minY = Math.min(minY, line.ly);
-          maxX = Math.max(maxX, line.lx + line.lw);
-          maxY = Math.max(maxY, line.ly + line.lh);
-
-          if (i === 0) firstLineY = line.ly;
-          if (i === processedLines.length - 1) lastLineY = line.ly;
-
-          if (!dominantFontName && line.font) {
-            dominantFontName = line.font.name;
-            dominantFontSize = line.font.size;
-            const lower = (dominantFontName || "").toLowerCase();
-            isBold = lower.includes("bold") || lower.includes("black");
+        // Split into sub-groups wherever the gap between consecutive lines
+        // exceeds GAP_FACTOR × fontSize (indicates a visual paragraph break).
+        const GAP_FACTOR = 0.8;
+        const groups: LineData[][] = [];
+        let cur: LineData[] = [validLines[0]];
+        for (let i = 1; i < validLines.length; i++) {
+          const prev = validLines[i - 1];
+          const curr = validLines[i];
+          const prevBottom = prev.bb.y + prev.bb.h;
+          const gap = curr.bb.y - prevBottom;
+          if (gap > prev.fontSize * GAP_FACTOR) {
+            groups.push(cur);
+            cur = [];
           }
-          if (dominantColor === undefined && line.color) dominantColor = toHexColor(line.color);
+          cur.push(curr);
         }
-        const finalX = (minX - bounds[0]) / pageWidth;
-        const finalY = (minY - bounds[1]) / pageHeight;
-        const finalW = (maxX - minX) / pageWidth;
-        const finalH = (maxY - minY) / pageHeight;
+        groups.push(cur);
 
-        let calculatedLineHeight = 1.2;
-        if (dominantFontSize > 0 && processedLines.length > 1) {
-          const totalDist = Math.abs(lastLineY - firstLineY);
-          const avgDist = totalDist / (processedLines.length - 1);
-          calculatedLineHeight = avgDist / dominantFontSize;
-        }
+        // Emit one TextItem per group
+        for (const grp of groups) {
+          let fullText = "";
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+          let firstLineCY: number | null = null;
+          let lastLineCY: number | null = null;
+          // Majority vote: count lines per fontName/fontSize/color
+          const fontNameCount: Record<string, number> = {};
+          const fontSizeCount: Record<string, number> = {};
+          const colorCount: Record<string, number> = {};
 
-        if (fullText.trim().length > 0) {
+          for (const ld of grp) {
+            fullText += (fullText ? "\n" : "") + ld.text;
+            minX = Math.min(minX, ld.bb.x);
+            minY = Math.min(minY, ld.bb.y);
+            maxX = Math.max(maxX, ld.bb.x + ld.bb.w);
+            maxY = Math.max(maxY, ld.bb.y + ld.bb.h);
+            const cy = ld.bb.y + ld.bb.h / 2;
+            if (firstLineCY === null) firstLineCY = cy;
+            lastLineCY = cy;
+            fontNameCount[ld.fontName] = (fontNameCount[ld.fontName] || 0) + 1;
+            fontSizeCount[String(ld.fontSize)] = (fontSizeCount[String(ld.fontSize)] || 0) + 1;
+            if (ld.color) colorCount[ld.color] = (colorCount[ld.color] || 0) + 1;
+          }
+
+          if (!fullText.trim() || minX === Infinity) continue;
+
+          // Pick majority font name, size, color
+          const pickTop = (counts: Record<string, number>) =>
+            Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
+          const dominantFontName = pickTop(fontNameCount) || "Helvetica";
+          const dominantFontSize = parseFloat(pickTop(fontSizeCount)) || 12;
+          const dominantColor = pickTop(colorCount) || null;
+          const isBold = dominantFontName.toLowerCase().includes("bold") || dominantFontName.toLowerCase().includes("black");
+
+          let calculatedLineHeight = 1.2;
+          if (dominantFontSize > 0 && grp.length > 1 && firstLineCY !== null && lastLineCY !== null) {
+            const avgSpacing = Math.abs(lastLineCY - firstLineCY) / (grp.length - 1);
+            calculatedLineHeight = Math.max(1.0, Math.min(3.0, avgSpacing / dominantFontSize));
+          }
+
           textItems.push({
             text: fullText,
-            x: finalX,
-            y: finalY,
-            width: finalW,
-            height: finalH,
+            x: normX(minX),
+            y: normY(minY),
+            width: normW(maxX - minX),
+            height: normH(maxY - minY),
             fontSize: dominantFontSize,
             fontName: dominantFontName,
             color: dominantColor,
-            isBold: isBold,
-            lineHeight: calculatedLineHeight
+            isBold,
+            lineHeight: calculatedLineHeight,
           });
         }
       }
     }
+
     return textItems;
   } catch (e) {
     console.error("Text extraction failed:", e);
     return [];
   } finally {
+    structuredText?.destroy?.();
+    page?.destroy?.();
     if (doc) doc.destroy();
   }
 }
@@ -676,25 +713,44 @@ async function applyRedactionsWithMuPDF(
       }
     }
 
-    const buf = doc.saveToBuffer("garbage");
-    try {
-      const view: Uint8Array =
-        typeof buf.asUint8Array === "function"
-          ? buf.asUint8Array()
-          : buf instanceof Uint8Array
-            ? buf
-            : new Uint8Array(buf);
+    const saveOptionAttempts = [
+      "garbage=compact,continue-on-error",
+      "continue-on-error",
+      "garbage=compact",
+      "garbage",
+      "",
+    ];
 
-      const bytes = new Uint8Array(view); // makes a real JS-owned copy
+    let lastSaveError: unknown = null;
 
-      if (!(bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46)) {
-        throw new Error("MuPDF redaction output does not look like a PDF (missing %PDF header).");
+    for (const opts of saveOptionAttempts) {
+      let buf: any = null;
+      try {
+        buf = doc.saveToBuffer(opts);
+        const view: Uint8Array =
+          typeof buf.asUint8Array === "function"
+            ? buf.asUint8Array()
+            : buf instanceof Uint8Array
+              ? buf
+              : new Uint8Array(buf);
+
+        const bytes = new Uint8Array(view); // makes a real JS-owned copy
+
+        if (!(bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46)) {
+          throw new Error("MuPDF redaction output does not look like a PDF (missing %PDF header).");
+        }
+
+        return bytes;
+      } catch (e) {
+        lastSaveError = e;
+      } finally {
+        buf?.destroy?.();
       }
-
-      return bytes;
-    } finally {
-      buf.destroy?.();
     }
+
+    throw lastSaveError instanceof Error
+      ? lastSaveError
+      : new Error(String(lastSaveError ?? "MuPDF save failed"));
   } finally {
     doc.destroy?.();
   }

@@ -1,8 +1,6 @@
 import React from "react";
-import ExternalBreadcrumb from "@/components/tools/ExternalBreadcrumb";
 
 type NextoolyToolPageShellProps = {
-  breadcrumbLabel: string;
   title: string;
   description: string;
   tool: React.ReactNode;
@@ -11,7 +9,6 @@ type NextoolyToolPageShellProps = {
 };
 
 export default function NextoolyToolPageShell({
-  breadcrumbLabel,
   title,
   description,
   tool,
@@ -23,12 +20,7 @@ export default function NextoolyToolPageShell({
       {schema ?? null}
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* 1. Breadcrumb */}
-        <div className="mb-[12px]">
-          <ExternalBreadcrumb currentLabel={breadcrumbLabel} />
-        </div>
-
-        {/* 2. Page Header (Left Aligned) */}
+        {/* 1. Page Header (Left Aligned) */}
         <div className="text-left border-b border-gray-200 pb-2 mb-8">
           <h1 className="text-[26px] font-bold text-[#0f172a] mb-[6px] leading-tight">
             {title}
@@ -38,10 +30,10 @@ export default function NextoolyToolPageShell({
           </p>
         </div>
 
-        {/* 3. Tool */}
+        {/* 2. Tool */}
         <div className="mb-16">{tool}</div>
 
-        {/* 4. Sections */}
+        {/* 3. Sections */}
         {belowTool ?? null}
       </div>
     </main>

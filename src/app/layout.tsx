@@ -32,9 +32,9 @@ export const metadata: Metadata = {
 ],
 
   icons: {
-    icon: "/favicon.ico", 
-    shortcut: "/favicon.ico",
-    apple: "/favicon.ico",
+    icon: "/file.svg", 
+    shortcut: "/file.svg",
+    apple: "/main-logo.png",
   },
   openGraph: {
     title: "Nextooly PDF Tools — Compress, Protect & Unlock PDFs",

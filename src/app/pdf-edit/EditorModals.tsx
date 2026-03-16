@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useRef, useState, useEffect } from "react";
 import { Icons } from "@/app/pdf-edit/EditorIcons";
 import { removeWhiteBackground } from "@/app/pdf-edit/utils";
 import QRCode from "qrcode";
@@ -14,40 +14,76 @@ interface SignatureModalProps {
 export const SignatureModal = ({ onClose, onSave }: SignatureModalProps) => {
   const sigCanvasRef = useRef<HTMLCanvasElement>(null);
   const sigFileRef = useRef<HTMLInputElement>(null);
+  // Keep refs to active listeners so we can always clean them up
+  const moveRef = useRef<((ev: any) => void) | null>(null);
+  const upRef = useRef<(() => void) | null>(null);
+
+  // Guarantee cleanup when modal unmounts (covers mid-draw close)
+  useEffect(() => {
+    return () => {
+      if (moveRef.current) window.removeEventListener("mousemove", moveRef.current);
+      if (moveRef.current) window.removeEventListener("touchmove", moveRef.current);
+      if (upRef.current) window.removeEventListener("mouseup", upRef.current);
+      if (upRef.current) window.removeEventListener("touchend", upRef.current);
+    };
+  }, []);
 
   const startSignature = (e: any) => {
-    const canvas = sigCanvasRef.current; if (!canvas) return;
-    const ctx = canvas.getContext('2d'); if (!ctx) return;
-    ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.strokeStyle = '#000';
+    const canvas = sigCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.lineWidth = 2;
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "#000";
+
     const getPos = (ev: any) => {
       const r = canvas.getBoundingClientRect();
       if (ev.touches) return { x: ev.touches[0].clientX - r.left, y: ev.touches[0].clientY - r.top };
       return { x: ev.clientX - r.left, y: ev.clientY - r.top };
     };
-    const { x, y } = getPos(e); ctx.beginPath(); ctx.moveTo(x, y);
-    const move = (ev: any) => { ev.preventDefault(); const p = getPos(ev); ctx.lineTo(p.x, p.y); ctx.stroke(); };
-    const up = () => {
-      window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up);
-      window.removeEventListener('touchmove', move); window.removeEventListener('touchend', up);
+
+    const { x, y } = getPos(e);
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+
+    const move = (ev: any) => {
+      ev.preventDefault();
+      const p = getPos(ev);
+      ctx.lineTo(p.x, p.y);
+      ctx.stroke();
     };
-    window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
-    window.addEventListener('touchmove', move, { passive: false }); window.addEventListener('touchend', up);
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      window.removeEventListener("touchmove", move);
+      window.removeEventListener("touchend", up);
+      moveRef.current = null;
+      upRef.current = null;
+    };
+
+    moveRef.current = move;
+    upRef.current = up;
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    window.addEventListener("touchmove", move, { passive: false });
+    window.addEventListener("touchend", up);
   };
 
   const clearSignature = () => {
     const canvas = sigCanvasRef.current;
-    const ctx = canvas?.getContext('2d');
+    const ctx = canvas?.getContext("2d");
     if (canvas && ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
   };
 
   const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
     if (!f) return;
-    const validTypes = ['image/jpeg', 'image/png', 'image/jpg'];
+    const validTypes = ["image/jpeg", "image/png", "image/jpg"];
     if (!validTypes.includes(f.type)) {
-       alert("Only JPEG and PNG images are supported.");
-       e.target.value = ""; // Clear the input so they can try again
-       return;
+      alert("Only JPEG and PNG images are supported.");
+      e.target.value = "";
+      return;
     }
     const reader = new FileReader();
     reader.onload = async (evt) => {
@@ -71,10 +107,19 @@ export const SignatureModal = ({ onClose, onSave }: SignatureModalProps) => {
   };
 
   return (
-    <div className="modal-overlay">
+    <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Add Signature">
       <div className="modal-content">
         <h3 className="text-lg font-bold mb-4 text-gray-800">Add Signature</h3>
-        <canvas ref={sigCanvasRef} className="sig-canvas border border-gray-300 rounded w-full h-48" width={350} height={200} onMouseDown={startSignature} onTouchStart={startSignature} />
+        <canvas
+          ref={sigCanvasRef}
+          className="sig-canvas border border-gray-300 rounded w-full h-48"
+          width={350}
+          height={200}
+          onMouseDown={startSignature}
+          onTouchStart={startSignature}
+          aria-label="Signature drawing area — draw your signature here"
+          role="img"
+        />
         <div className="flex justify-between items-center mt-2">
           <span className="text-xs text-gray-400 font-bold uppercase">Draw Above</span>
           <button className="text-sm text-blue-600 font-medium flex items-center gap-1" onClick={() => sigFileRef.current?.click()}>
@@ -87,9 +132,12 @@ export const SignatureModal = ({ onClose, onSave }: SignatureModalProps) => {
             <button onClick={clearSignature} className="flex-1 py-2 border border-gray-300 rounded text-gray-600 hover:bg-gray-50">Clear</button>
             <button onClick={onClose} className="flex-1 py-2 border border-gray-300 rounded text-gray-600 hover:bg-gray-50">Cancel</button>
           </div>
-          <button onClick={() => {
-             if(sigCanvasRef.current) onSave(sigCanvasRef.current.toDataURL());
-          }} className="w-full py-3 bg-blue-600 text-white font-bold rounded shadow hover:bg-blue-700">Use Signature</button>
+          <button
+            onClick={() => { if (sigCanvasRef.current) onSave(sigCanvasRef.current.toDataURL()); }}
+            className="w-full py-3 bg-blue-600 text-white font-bold rounded shadow hover:bg-blue-700"
+          >
+            Use Signature
+          </button>
         </div>
       </div>
     </div>
@@ -97,7 +145,7 @@ export const SignatureModal = ({ onClose, onSave }: SignatureModalProps) => {
 };
 
 // ==========================================
-// 2. QR CODE MODAL (Client-Side)
+// 2. QR CODE MODAL
 // ==========================================
 interface QrModalProps {
   editingId: string | null;
@@ -111,17 +159,13 @@ export const QrModal = ({ editingId, initialText, savedQr: initialSavedQr, onClo
   const [text, setText] = useState(initialText);
   const [preview, setPreview] = useState<string | null>(initialSavedQr);
 
-  const generate = async () => {
-    if (!text) return;
+  const generate = async (value: string) => {
+    if (!value.trim()) return;
     try {
-      // Generates a Data URL (base64) purely on the client side
-      const url = await QRCode.toDataURL(text, { 
-        width: 200, 
+      const url = await QRCode.toDataURL(value, {
+        width: 200,
         margin: 1,
-        color: {
-          dark: '#000000',
-          light: '#ffffff'
-        }
+        color: { dark: "#000000", light: "#ffffff" },
       });
       setPreview(url);
     } catch (err) {
@@ -129,15 +173,19 @@ export const QrModal = ({ editingId, initialText, savedQr: initialSavedQr, onClo
     }
   };
 
-  // Auto-generate preview if editing an existing code
-  React.useEffect(() => {
-    if (editingId && initialText && !preview) {
-      generate();
-    }
+  // Auto-generate whenever text changes (debounced)
+  useEffect(() => {
+    const timer = setTimeout(() => { generate(text); }, 400);
+    return () => clearTimeout(timer);
+  }, [text]);
+
+  // Auto-generate on open if editing an existing code
+  useEffect(() => {
+    if (editingId && initialText) generate(initialText);
   }, []);
 
   return (
-    <div className="modal-overlay">
+    <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="QR Code Setup">
       <div className="modal-content w-[350px]">
         <h3 className="text-lg font-bold mb-4 text-gray-800">{editingId ? "Edit QR Code" : "Setup QR Code"}</h3>
         <input
@@ -146,18 +194,25 @@ export const QrModal = ({ editingId, initialText, savedQr: initialSavedQr, onClo
           placeholder="Enter text or URL"
           value={text}
           onChange={(e) => setText(e.target.value)}
+          autoFocus
         />
-        <button className="w-full py-2 bg-slate-200 hover:bg-slate-300 rounded mb-4 font-medium" onClick={generate}>
-          Generate Preview
-        </button>
         {preview && (
           <div className="flex justify-center mb-4 p-4 border rounded bg-white">
-            <img src={preview} alt="QR Preview" className="w-32 h-32" />
+            <img src={preview} alt="QR Code Preview" className="w-32 h-32" />
+          </div>
+        )}
+        {!preview && text.trim() && (
+          <div className="flex justify-center mb-4 p-4 border rounded bg-slate-50 text-slate-400 text-sm h-32 items-center">
+            Generating…
           </div>
         )}
         <div className="flex gap-3">
           <button onClick={onClose} className="flex-1 py-2 border border-gray-300 rounded text-gray-600 hover:bg-gray-50">Cancel</button>
-          <button onClick={() => preview && onSave(preview, text)} disabled={!preview} className="flex-1 py-2 bg-blue-600 text-white font-bold rounded hover:bg-blue-700 disabled:opacity-50">
+          <button
+            onClick={() => preview && onSave(preview, text)}
+            disabled={!preview}
+            className="flex-1 py-2 bg-blue-600 text-white font-bold rounded hover:bg-blue-700 disabled:opacity-50"
+          >
             {editingId ? "Update Item" : "Save & Use"}
           </button>
         </div>
@@ -183,21 +238,19 @@ export const StampModal = ({ editingId, savedStamp: initialStamp, onClose, onSav
   const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
     if (!f) return;
-    const validTypes = ['image/jpeg', 'image/png', 'image/jpg'];
+    const validTypes = ["image/jpeg", "image/png", "image/jpg"];
     if (!validTypes.includes(f.type)) {
-       alert("Only JPEG and PNG images are supported.");
-       e.target.value = ""; // Clear the input
-       return;
+      alert("Only JPEG and PNG images are supported.");
+      e.target.value = "";
+      return;
     }
     const reader = new FileReader();
-    reader.onload = (evt) => {
-      setPreview(evt.target?.result as string);
-    };
+    reader.onload = (evt) => { setPreview(evt.target?.result as string); };
     reader.readAsDataURL(f);
   };
 
   return (
-    <div className="modal-overlay">
+    <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Stamp Setup">
       <div className="modal-content w-[350px]">
         <h3 className="text-lg font-bold mb-4 text-gray-800">{editingId ? "Edit Stamp" : "Setup Stamp"}</h3>
         <div className="mb-4 text-center">
@@ -218,7 +271,11 @@ export const StampModal = ({ editingId, savedStamp: initialStamp, onClose, onSav
         )}
         <div className="flex gap-3">
           <button onClick={onClose} className="flex-1 py-2 border border-gray-300 rounded text-gray-600 hover:bg-gray-50">Cancel</button>
-          <button onClick={() => preview && onSave(preview)} disabled={!preview} className="flex-1 py-2 bg-blue-600 text-white font-bold rounded hover:bg-blue-700 disabled:opacity-50">
+          <button
+            onClick={() => preview && onSave(preview)}
+            disabled={!preview}
+            className="flex-1 py-2 bg-blue-600 text-white font-bold rounded hover:bg-blue-700 disabled:opacity-50"
+          >
             {editingId ? "Update Item" : "Save & Use"}
           </button>
         </div>
@@ -239,12 +296,10 @@ interface MetadataModalProps {
 export const MetadataModal = ({ metadata: initial, onClose, onSave }: MetadataModalProps) => {
   const [data, setData] = useState(initial);
 
-  // Helper to safely format dates
   const formatDate = (dateVal: any) => {
     if (!dateVal) return "-";
     try {
-      // Handle both Date objects and string ISO dates
-      const d = typeof dateVal === 'string' ? new Date(dateVal) : dateVal;
+      const d = typeof dateVal === "string" ? new Date(dateVal) : dateVal;
       return d.toLocaleString();
     } catch (e) {
       return "-";
@@ -252,102 +307,79 @@ export const MetadataModal = ({ metadata: initial, onClose, onSave }: MetadataMo
   };
 
   return (
-    <div className="modal-overlay">
-      <div className="modal-content" style={{ width: '500px' }}>
+    <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Document Properties">
+      <div className="modal-content" style={{ width: "500px" }}>
         <h3 className="text-lg font-bold mb-4 text-gray-800">Document Properties</h3>
-        
         <div className="flex flex-col gap-4">
-          {/* --- EDITABLE FIELDS --- */}
           <div>
             <label className="block text-gray-500 font-semibold mb-1 text-sm">Title</label>
-            <input 
-              className="w-full border border-gray-300 p-2 rounded text-sm focus:ring-2 focus:ring-blue-500 outline-none" 
-              value={data.title || ""} 
-              onChange={e => setData({ ...data, title: e.target.value })} 
+            <input
+              className="w-full border border-gray-300 p-2 rounded text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+              value={data.title || ""}
+              onChange={e => setData({ ...data, title: e.target.value })}
               placeholder="Document Title"
             />
           </div>
-
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-gray-500 font-semibold mb-1 text-sm">Author</label>
-              <input 
-                className="w-full border border-gray-300 p-2 rounded text-sm focus:ring-2 focus:ring-blue-500 outline-none" 
-                value={data.author || ""} 
-                onChange={e => setData({ ...data, author: e.target.value })} 
+              <input
+                className="w-full border border-gray-300 p-2 rounded text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                value={data.author || ""}
+                onChange={e => setData({ ...data, author: e.target.value })}
                 placeholder="Author Name"
               />
             </div>
             <div>
               <label className="block text-gray-500 font-semibold mb-1 text-sm">Subject</label>
-              <input 
-                className="w-full border border-gray-300 p-2 rounded text-sm focus:ring-2 focus:ring-blue-500 outline-none" 
-                value={data.subject || ""} 
-                onChange={e => setData({ ...data, subject: e.target.value })} 
+              <input
+                className="w-full border border-gray-300 p-2 rounded text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                value={data.subject || ""}
+                onChange={e => setData({ ...data, subject: e.target.value })}
                 placeholder="Subject"
               />
             </div>
           </div>
-
           <div>
             <label className="block text-gray-500 font-semibold mb-1 text-sm">Keywords</label>
-            <input 
-              className="w-full border border-gray-300 p-2 rounded text-sm focus:ring-2 focus:ring-blue-500 outline-none" 
-              value={data.keywords || ""} 
-              onChange={e => setData({ ...data, keywords: e.target.value })} 
+            <input
+              className="w-full border border-gray-300 p-2 rounded text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+              value={data.keywords || ""}
+              onChange={e => setData({ ...data, keywords: e.target.value })}
               placeholder="Separated by commas"
             />
           </div>
-
-          {/* --- READ-ONLY INFO SECTION --- */}
           <div className="mt-2 pt-3 border-t border-gray-200 bg-slate-50 p-3 rounded-md">
-            {/* <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Read-Only Properties</h4> */}
             <div className="grid grid-cols-2 gap-y-2 gap-x-4 text-xs">
               <div>
                 <span className="block text-gray-500">PDF Producer:</span>
-                <span className="block font-medium text-gray-700 truncate" title={data.producer}>
-                  {data.producer || "Unknown"}
-                </span>
+                <span className="block font-medium text-gray-700 truncate" title={data.producer}>{data.producer || "Unknown"}</span>
               </div>
               <div>
                 <span className="block text-gray-500">PDF Creator:</span>
-                <span className="block font-medium text-gray-700 truncate" title={data.creator}>
-                  {data.creator || "Unknown"}
-                </span>
+                <span className="block font-medium text-gray-700 truncate" title={data.creator}>{data.creator || "Unknown"}</span>
               </div>
               <div>
                 <span className="block text-gray-500">Created:</span>
-                <span className="block font-medium text-gray-700">
-                  {formatDate(data.creationDate)}
-                </span>
+                <span className="block font-medium text-gray-700">{formatDate(data.creationDate)}</span>
               </div>
               <div>
                 <span className="block text-gray-500">Modified:</span>
-                <span className="block font-medium text-gray-700">
-                  {formatDate(data.modificationDate)}
-                </span>
+                <span className="block font-medium text-gray-700">{formatDate(data.modificationDate)}</span>
               </div>
               {data.pageCount && (
                 <div className="col-span-2 mt-1">
-                   <span className="text-gray-500">Page Count: </span>
-                   <span className="font-medium text-gray-700">{data.pageCount}</span>
+                  <span className="text-gray-500">Page Count: </span>
+                  <span className="font-medium text-gray-700">{data.pageCount}</span>
                 </div>
               )}
             </div>
           </div>
-
-          {/* --- ACTIONS --- */}
           <div className="flex justify-end gap-3 mt-2">
-            <button 
-              className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded text-sm font-medium transition-colors" 
-              onClick={onClose}
-            >
+            <button className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded text-sm font-medium transition-colors" onClick={onClose}>
               Cancel
             </button>
-            <button 
-              className="px-6 py-2 bg-blue-600 text-white font-bold rounded text-sm hover:bg-blue-700 shadow-sm transition-all active:scale-95" 
-              onClick={() => onSave(data)}
-            >
+            <button className="px-6 py-2 bg-blue-600 text-white font-bold rounded text-sm hover:bg-blue-700 shadow-sm transition-all active:scale-95" onClick={() => onSave(data)}>
               Save Changes
             </button>
           </div>
@@ -358,93 +390,100 @@ export const MetadataModal = ({ metadata: initial, onClose, onSave }: MetadataMo
 };
 
 // ==========================================
-// 5. WATERMARK MODAL
+// 5. CONFIRM DIALOG
 // ==========================================
-// interface WatermarkModalProps {
-//   onClose: () => void;
-//   onSave: (settings: { text: string; range: string; color: string; opacity: number; rotation: number; size: number }) => void;
-// }
+interface ConfirmDialogProps {
+  message: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
 
-// export const WatermarkModal = ({ onClose, onSave }: WatermarkModalProps) => {
-//   const [text, setText] = useState("CONFIDENTIAL");
-//   const [range, setRange] = useState("all"); // "all" or "1-5, 8"
-//   const [color, setColor] = useState("#ff0000");
-//   const [opacity, setOpacity] = useState(0.3);
-//   const [rotation, setRotation] = useState(45);
-//   const [size, setSize] = useState(60);
+export const ConfirmDialog = ({
+  message,
+  confirmLabel = "Confirm",
+  cancelLabel = "Cancel",
+  onConfirm,
+  onCancel,
+}: ConfirmDialogProps) => (
+  <div className="modal-overlay" role="alertdialog" aria-modal="true" aria-label={message}>
+    <div className="modal-content" style={{ width: "380px" }}>
+      <p className="text-gray-700 font-medium text-sm leading-relaxed mb-6">{message}</p>
+      <div className="flex gap-3 justify-end">
+        <button
+          className="px-4 py-2 border border-gray-300 rounded text-gray-600 hover:bg-gray-50 text-sm font-medium transition-colors"
+          onClick={onCancel}
+        >
+          {cancelLabel}
+        </button>
+        <button
+          className="px-5 py-2 bg-red-600 text-white font-bold rounded text-sm hover:bg-red-700 transition-colors active:scale-95"
+          onClick={onConfirm}
+        >
+          {confirmLabel}
+        </button>
+      </div>
+    </div>
+  </div>
+);
 
-//   return (
-//     <div className="modal-overlay">
-//       <div className="modal-content w-[400px]">
-//         <h3 className="text-lg font-bold mb-4 text-gray-800">Add Watermark</h3>
+// ==========================================
+// 6. PROMPT DIALOG
+// ==========================================
+interface PromptDialogProps {
+  message: string;
+  defaultValue?: string;
+  placeholder?: string;
+  confirmLabel?: string;
+  onConfirm: (value: string) => void;
+  onCancel: () => void;
+}
 
-//         <div className="flex flex-col gap-4">
-//           <div>
-//             <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Watermark Text</label>
-//             <input
-//               className="w-full border border-gray-300 p-2 rounded focus:ring-2 focus:ring-blue-500 outline-none"
-//               value={text}
-//               onChange={(e) => setText(e.target.value)}
-//               placeholder="e.g. DRAFT, CONFIDENTIAL"
-//             />
-//           </div>
+export const PromptDialog = ({
+  message,
+  defaultValue = "",
+  placeholder = "",
+  confirmLabel = "OK",
+  onConfirm,
+  onCancel,
+}: PromptDialogProps) => {
+  const [value, setValue] = useState(defaultValue);
 
-//           <div className="grid grid-cols-2 gap-4">
-//              <div>
-//               <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Color</label>
-//               <div className="flex items-center gap-2 border border-gray-300 p-2 rounded bg-white">
-//                 <input type="color" className="w-6 h-6 p-0 border-0 rounded cursor-pointer" value={color} onChange={(e) => setColor(e.target.value)} />
-//                 <span className="text-xs text-gray-500">{color}</span>
-//               </div>
-//             </div>
-//             <div>
-//               <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Font Size</label>
-//               <input type="number" className="w-full border border-gray-300 p-2 rounded" value={size} onChange={(e) => setSize(Number(e.target.value))} />
-//             </div>
-//           </div>
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && value.trim()) onConfirm(value.trim());
+    if (e.key === "Escape") onCancel();
+  };
 
-//           <div className="grid grid-cols-2 gap-4">
-//             <div>
-//               <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Opacity: {Math.round(opacity * 100)}%</label>
-//               <input type="range" min="0.1" max="1" step="0.1" className="w-full" value={opacity} onChange={(e) => setOpacity(parseFloat(e.target.value))} />
-//             </div>
-//             <div>
-//               <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Rotation: {rotation}°</label>
-//               <input type="range" min="0" max="360" step="15" className="w-full" value={rotation} onChange={(e) => setRotation(parseInt(e.target.value))} />
-//             </div>
-//           </div>
-
-//           <div>
-//             <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Page Range</label>
-//             <div className="flex gap-4 mb-2">
-//               <label className="flex items-center gap-2 text-sm cursor-pointer">
-//                 <input type="radio" name="range" checked={range === "all"} onChange={() => setRange("all")} /> All Pages
-//               </label>
-//               <label className="flex items-center gap-2 text-sm cursor-pointer">
-//                 <input type="radio" name="range" checked={range !== "all"} onChange={() => setRange("")} /> Custom
-//               </label>
-//             </div>
-//             {range !== "all" && (
-//               <input
-//                 className="w-full border border-gray-300 p-2 rounded text-sm placeholder:text-gray-300"
-//                 placeholder="e.g. 1, 3-5, 10"
-//                 value={range}
-//                 onChange={(e) => setRange(e.target.value)}
-//               />
-//             )}
-//           </div>
-
-//           <div className="flex justify-end gap-3 mt-4 pt-4 border-t border-gray-100">
-//             <button onClick={onClose} className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded">Cancel</button>
-//             <button
-//               onClick={() => onSave({ text, range, color, opacity, rotation, size })}
-//               className="px-6 py-2 bg-blue-600 text-white font-bold rounded hover:bg-blue-700 shadow-sm"
-//             >
-//               Add Watermark
-//             </button>
-//           </div>
-//         </div>
-//       </div>
-//     </div>
-//   );
-// };
+  return (
+    <div className="modal-overlay" role="dialog" aria-modal="true" aria-label={message}>
+      <div className="modal-content" style={{ width: "380px" }}>
+        <p className="text-gray-700 font-medium text-sm mb-3">{message}</p>
+        <input
+          type="text"
+          className="w-full border border-gray-300 p-2 rounded text-sm focus:ring-2 focus:ring-blue-500 outline-none mb-5"
+          value={value}
+          placeholder={placeholder}
+          onChange={e => setValue(e.target.value)}
+          onKeyDown={handleKeyDown}
+          autoFocus
+        />
+        <div className="flex gap-3 justify-end">
+          <button
+            className="px-4 py-2 border border-gray-300 rounded text-gray-600 hover:bg-gray-50 text-sm font-medium transition-colors"
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+          <button
+            className="px-5 py-2 bg-blue-600 text-white font-bold rounded text-sm hover:bg-blue-700 transition-colors active:scale-95 disabled:opacity-50"
+            disabled={!value.trim()}
+            onClick={() => onConfirm(value.trim())}
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
