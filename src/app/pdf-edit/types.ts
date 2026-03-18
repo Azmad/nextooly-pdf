@@ -25,6 +25,7 @@ export type Annotation = {
   rotation?: number;
   groupId?: string;
   lineHeight?: number;
+  fontDensity?: number;
   isSingleLine?: boolean;
   originalBounds?: { x: number, y: number, width: number, height: number };
   originalText?: string;

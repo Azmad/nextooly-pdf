@@ -67,7 +67,7 @@ const createNewAnnotation = (
 
   switch (tool) {
     case "text":
-      return { ...base, type: "text", x, y, width: 0.18, height: 0.025, content: "Type here", size: opts.fontSize, font: opts.font };
+      return { ...base, type: "text", x, y, width: 0.18, height: 0.025, content: "Type here", size: opts.fontSize, font: opts.font, fontDensity: 100 };
     case "rect":
       return { ...base, type: "rect", x, y, width: 0.2, height: 0.05, isFill: opts.opacity < 1 || (opts.color === "#ffffff" && opts.opacity === 1) };
     case "redact":
@@ -90,6 +90,8 @@ const createNewAnnotation = (
       return null;
   }
 };
+
+const getFontDensityLetterSpacingEm = (fontDensity: number = 100) => (100 - fontDensity) / 500;
 
 /** ---------------- Component ---------------- */
 export default function PdfEditorTool() {
@@ -170,6 +172,12 @@ export default function PdfEditorTool() {
   const formatFontSizeValue = useCallback((size: number) => {
     const rounded = Math.round(size * 10) / 10;
     return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+  }, []);
+
+  const formatCompactValue = useCallback((value: number, precision: number = 2) => {
+    const rounded = Math.round(value * (10 ** precision)) / (10 ** precision);
+    if (Number.isInteger(rounded)) return String(rounded);
+    return rounded.toFixed(precision).replace(/0+$/, "").replace(/\.$/, "");
   }, []);
 
   const getSelectionHost = useCallback((node: Node | null): HTMLElement | null => {
@@ -491,7 +499,7 @@ export default function PdfEditorTool() {
               return { ...a, color: value };
             }
             if (key === "backgroundColor" && a.type === "redact") return { ...a, color: value };
-            if ((key === "size" || key === "font" || key === "isBold" || key === "isItalic" || key === "isUnderline" || key === "lineHeight") &&
+            if ((key === "size" || key === "font" || key === "isBold" || key === "isItalic" || key === "isUnderline" || key === "lineHeight" || key === "fontDensity") &&
               (a.type === "text" || a.type === "text_edit")) {
               return { ...a, [key]: value };
             }
@@ -676,14 +684,6 @@ export default function PdfEditorTool() {
     return "Helvetica";
   };
 
-  const isNeutralTextColor = (color?: string | null) => {
-    if (!color || !/^#([0-9a-f]{6})$/i.test(color)) return false;
-    const r = parseInt(color.slice(1, 3), 16);
-    const g = parseInt(color.slice(3, 5), 16);
-    const b = parseInt(color.slice(5, 7), 16);
-    return Math.max(r, g, b) - Math.min(r, g, b) <= 24;
-  };
-
   const handleTextBlockClick = (block: TextItem) => {
     setHasEditTextInteracted(true);
     const id = Date.now().toString();
@@ -711,10 +711,16 @@ export default function PdfEditorTool() {
     const patchHeight = Math.min(1 - patchTop, safeHeight + (patchBleedY * 2));
     const editorTop = block.y;
     const editorBottom = Math.max(block.y + block.height, safeBottom);
+    const lineCount = Math.max(1, block.text.split("\n").length);
+    const estimatedTextHeight =
+      (((block.fontSize || 12) * state.scale) * (block.lineHeight ?? 1.15) * lineCount +
+        ((block.fontSize || 12) * state.scale * 0.35)) /
+      Math.max(state.pageSize.height || 1, 1);
     const editorHeight = isSingleLineEdit
-      ? block.height
+      ? Math.max(block.height, estimatedTextHeight)
       : Math.max(
           block.height,
+          estimatedTextHeight,
           (editorBottom - editorTop) + (block.height * 0.18)
         );
     const singleLineWidthPadding = Math.max(block.width * 0.06, 0.01);
@@ -724,9 +730,6 @@ export default function PdfEditorTool() {
     const shrinkX = safeWidth * (eraserPaddingX / 100);
     const shrinkY = safeHeight * (eraserPaddingY / 100);
     const extractedTextColor = block.color || scannedPalette[0] || "#000000";
-    const exactTextColor = isSingleLineEdit && !isNeutralTextColor(extractedTextColor)
-      ? "#000000"
-      : extractedTextColor;
     const distinctColors = new Set<string>();
     if (block.color) distinctColors.add(block.color);
     scannedPalette.forEach(c => distinctColors.add(c));
@@ -767,14 +770,16 @@ export default function PdfEditorTool() {
       y: editorTop,
       width: editorWidth,
       height: Math.max(0.002, editorHeight),
-      content: block.text.replace(/\n/g, "<br/>"),
-      color: exactTextColor,
+      content: block.html || block.text.replace(/\n/g, "<br/>"),
+      color: extractedTextColor,
       isBold: block.isBold || false,
+      isItalic: block.isItalic || false,
       size: block.fontSize,
       font: guessFont(block.fontName),
       opacity: 1,
       isSingleLine: isSingleLineEdit,
-      lineHeight: block.lineHeight ?? 1.15,
+      lineHeight: Math.round((block.lineHeight ?? 1.15) * 100) / 100,
+      fontDensity: 100,
     };
 
     pushHistory({
@@ -1795,7 +1800,7 @@ export default function PdfEditorTool() {
                         )}
 
                         {/* --- 3. LINE HEIGHT (Restored) --- */}
-                        <div className="flex items-center gap-2 border-l border-slate-200 pl-2 ml-2">
+                        <div className="flex items-center gap-2 border-l border-slate-200 pl-2 ml-2 shrink-0 whitespace-nowrap">
                           <span className="text-xs text-slate-500 font-medium">Line Ht:</span>
                           <input
                             type="range"
@@ -1803,9 +1808,23 @@ export default function PdfEditorTool() {
                             className="w-16 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer"
                             value={selectedAnn.lineHeight ?? 1.15}
                             onChange={(e) => updateProperty("lineHeight", parseFloat(e.target.value))}
-                            title={`Line Height: ${selectedAnn.lineHeight ?? 1.15}`}
+                            title={`Line Height: ${formatCompactValue(selectedAnn.lineHeight ?? 1.15)}`}
                           />
-                          <span className="text-[10px] w-6 text-center text-slate-600">{selectedAnn.lineHeight ?? 1.15}</span>
+                          <span className="text-[10px] w-10 text-center text-slate-600 font-mono tabular-nums">
+                            {formatCompactValue(selectedAnn.lineHeight ?? 1.15)}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 border-l border-slate-200 pl-2 ml-2 shrink-0 whitespace-nowrap">
+                          <span className="text-xs text-slate-500 font-medium">Density:</span>
+                          <input
+                            type="range"
+                            min="50" max="150" step="1"
+                            className="w-16 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer"
+                            value={selectedAnn.fontDensity ?? 100}
+                            onChange={(e) => updateProperty("fontDensity", parseInt(e.target.value, 10))}
+                            title={`Font Density: ${selectedAnn.fontDensity ?? 100}%`}
+                          />
+                          <span className="text-[10px] w-10 text-center text-slate-600 font-mono tabular-nums">{selectedAnn.fontDensity ?? 100}%</span>
                         </div>
                       </>
                     )}
@@ -2436,13 +2455,15 @@ export default function PdfEditorTool() {
                                   background: "transparent", // Background handled by patch
                                   color: ann.color,
                                   fontSize: `${(ann.size || 12) * state.scale}px`,
+                                  letterSpacing: `${getFontDensityLetterSpacingEm(ann.fontDensity ?? 100)}em`,
                                   lineHeight: ann.lineHeight ?? 1.15,
                                   boxSizing: "border-box",
                                   display: "block",
                                   border: "none",
                                   padding: "0",
                                   margin: "0",
-                                  overflow: ann.isSingleLine ? "hidden" : "auto",
+                                  overflowX: ann.isSingleLine ? "auto" : "hidden",
+                                  overflowY: ann.isSingleLine ? "hidden" : "auto",
                                   whiteSpace: ann.isSingleLine ? "pre" : "pre-wrap",
                                   wordBreak: ann.isSingleLine ? "normal" : "break-word",
                                   fontWeight: ann.isBold ? 'bold' : 'normal',
@@ -2556,6 +2577,7 @@ export default function PdfEditorTool() {
                                 background: ann.backgroundColor || "transparent",
                                 color: ann.color,
                                 fontSize: `${(ann.size || 12) * state.scale}px`,
+                                letterSpacing: `${getFontDensityLetterSpacingEm(ann.fontDensity ?? 100)}em`,
                                 lineHeight: ann.lineHeight ?? 1.35,
                                 border: ann.backgroundColor ? "1px solid #e5e5e5" : "none",
                                 padding: ann.backgroundColor ? "4px" : "0",

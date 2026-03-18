@@ -21,7 +21,9 @@ import { loadMuPDF } from "./client";
 import {
   PDFDocument, rgb, degrees, StandardFonts, PDFFont, PageSizes, PDFBool,
   PDFTextField, PDFCheckBox, PDFRadioGroup, PDFDropdown, PDFOptionList,
-  PDFName, PDFDict, PDFArray, PDFRef // <--- ADD PDFRef HERE
+  PDFName, PDFDict, PDFArray, PDFRef, beginText, endText, pushGraphicsState,
+  popGraphicsState, setFillingColor, setFontAndSize, setCharacterSpacing,
+  rotateAndSkewTextDegreesAndTranslate, showText, setGraphicsState
 } from "pdf-lib";
 import fontkit from '@pdf-lib/fontkit';
 
@@ -182,6 +184,86 @@ type TextRun = {
   size: number;
 };
 
+export type TextStyleRun = {
+  text: string;
+  color?: string | null;
+  fontName?: string;
+  fontSize?: number;
+  isBold?: boolean;
+  isItalic?: boolean;
+};
+
+function normalizePdfFontName(fontName?: string | null) {
+  if (!fontName) return "Helvetica";
+  const lower = fontName.toLowerCase();
+  if (lower.includes("times") || lower.includes("serif")) return "Times Roman";
+  if (lower.includes("courier") || lower.includes("mono")) return "Courier";
+  return "Helvetica";
+}
+
+function escapeHtml(text: string) {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function countCharacters(text: string) {
+  return Array.from(text).length;
+}
+
+function getDensityLetterSpacingEm(fontDensity: number = 100) {
+  return (100 - fontDensity) / 500;
+}
+
+function getCharacterSpacingForDensity(fontSize: number, fontDensity: number = 100) {
+  return fontSize * getDensityLetterSpacingEm(fontDensity);
+}
+
+function getFontCacheKey(fontName?: string, isBold?: boolean, isItalic?: boolean) {
+  return `${fontName || "Helvetica"}_${isBold ? "b" : ""}_${isItalic ? "i" : ""}`;
+}
+
+function trimTrailingWhitespaceFromRuns(runs: TextStyleRun[]) {
+  const trimmed = runs.map((run) => ({ ...run }));
+  while (trimmed.length > 0) {
+    const last = trimmed[trimmed.length - 1];
+    const nextText = last.text.replace(/\s+$/, "");
+    if (nextText.length > 0) {
+      last.text = nextText;
+      break;
+    }
+    trimmed.pop();
+  }
+  return trimmed.filter((run) => run.text.length > 0);
+}
+
+function buildRichTextHtml(
+  runs: TextStyleRun[],
+  baseStyle: { color?: string | null; fontSize: number; isBold: boolean; isItalic: boolean }
+) {
+  const baseColor = baseStyle.color?.toLowerCase() || "";
+
+  return runs
+    .map((run) => {
+      const styles: string[] = [];
+      const runColor = run.color?.toLowerCase() || "";
+
+      if (runColor && runColor !== baseColor) styles.push(`color: ${run.color}`);
+      if (!!run.isBold !== baseStyle.isBold) styles.push(`font-weight: ${run.isBold ? "700" : "400"}`);
+      if (!!run.isItalic !== baseStyle.isItalic) styles.push(`font-style: ${run.isItalic ? "italic" : "normal"}`);
+
+      const runFontSize = run.fontSize ?? baseStyle.fontSize;
+      if (baseStyle.fontSize > 0 && Math.abs(runFontSize - baseStyle.fontSize) > 0.05) {
+        styles.push(`font-size: ${(runFontSize / baseStyle.fontSize).toFixed(4)}em`);
+      }
+
+      const text = escapeHtml(run.text);
+      return styles.length > 0 ? `<span style="${styles.join("; ")}">${text}</span>` : text;
+    })
+    .join("");
+}
+
 function normalizeColorToHex(colorStr: string): string | null {
   if (!colorStr) return null;
   const s = colorStr.trim();
@@ -246,12 +328,17 @@ function parseRichText(html: string, baseStyle: { color: string; isBold: boolean
       // 4. Color
       let foundColor = normalizeColorToHex(el.style.color) || (el.hasAttribute("color") ? normalizeColorToHex(el.getAttribute("color") || "") : null);
       if (foundColor) newStyle.color = foundColor;
+      if (el.style.fontFamily) {
+        newStyle.font = normalizePdfFontName(el.style.fontFamily);
+      }
       const fSize = el.style.fontSize;
       if (fSize) {
         if (fSize.endsWith("em")) {
           newStyle.size *= parseFloat(fSize);
         } else if (fSize.endsWith("%")) {
           newStyle.size *= (parseFloat(fSize) / 100);
+        } else if (fSize.endsWith("px")) {
+          newStyle.size = parseFloat(fSize);
         }
       }
 
@@ -267,7 +354,8 @@ function wrapRichText(
   runs: TextRun[],
   maxWidth: number,
   fontMap: Map<string, PDFFont>,
-  baseFontName: string
+  baseFontName: string,
+  fontDensity: number = 100
 ): TextRun[][] {
   const lines: TextRun[][] = [];
   let currentLine: TextRun[] = [];
@@ -285,11 +373,13 @@ function wrapRichText(
 
     for (const word of words) {
       if (word === "") continue;
-      const fontKey = run.isBold ? `${baseFontName}_bold` : baseFontName;
-      const font = fontMap.get(fontKey) || fontMap.get(baseFontName);
+      const fontKey = getFontCacheKey(run.font || baseFontName, run.isBold, run.isItalic);
+      const fallbackKey = getFontCacheKey(baseFontName, run.isBold, run.isItalic);
+      const font = fontMap.get(fontKey) || fontMap.get(fallbackKey) || fontMap.get(getFontCacheKey(baseFontName));
       let wordWidth = 0;
       try {
-        wordWidth = font ? font.widthOfTextAtSize(word, run.size) : 0;
+        const charSpacing = getCharacterSpacingForDensity(run.size, fontDensity);
+        wordWidth = font ? font.widthOfTextAtSize(word, run.size) + (Math.max(0, countCharacters(word) - 1) * charSpacing) : 0;
       } catch (e) { wordWidth = 0; }
 
       // 3. Check Wrapping
@@ -303,6 +393,7 @@ function wrapRichText(
       const lastRun = currentLine[currentLine.length - 1];
       if (lastRun &&
         lastRun.isBold === run.isBold &&
+        lastRun.isItalic === run.isItalic &&
         lastRun.color === run.color &&
         lastRun.size === run.size &&
         lastRun.font === run.font) {
@@ -321,18 +412,21 @@ function wrapRichText(
 }
 
 // Helper to measure width of a specific run
-function getRunWidth(run: TextRun, fontMap: Map<string, PDFFont>, baseFontName: string): number {
-  const fontKey = run.isBold ? `${baseFontName}_bold` : baseFontName;
-  const font = fontMap.get(fontKey) || fontMap.get(baseFontName); // Fallback
+function getRunWidth(run: TextRun, fontMap: Map<string, PDFFont>, baseFontName: string, fontDensity: number = 100): number {
+  const fontKey = getFontCacheKey(run.font || baseFontName, run.isBold, run.isItalic);
+  const fallbackKey = getFontCacheKey(baseFontName, run.isBold, run.isItalic);
+  const font = fontMap.get(fontKey) || fontMap.get(fallbackKey) || fontMap.get(getFontCacheKey(baseFontName));
   if (!font) return 0;
 
   try {
-    return font.widthOfTextAtSize(run.text, run.size);
+    const charSpacing = getCharacterSpacingForDensity(run.size, fontDensity);
+    return font.widthOfTextAtSize(run.text, run.size) + (Math.max(0, countCharacters(run.text) - 1) * charSpacing);
   } catch (e) { return 0; }
 }
 
 export type TextItem = {
   text: string;
+  html?: string;
   x: number;
   y: number;
   width: number;
@@ -341,6 +435,7 @@ export type TextItem = {
   fontName?: string;
   color?: string | null;
   isBold?: boolean;
+  isItalic?: boolean;
   lineHeight?: number;
 };
 
@@ -405,13 +500,6 @@ export async function getPageText(
     const pageHeight = bounds[3] - bounds[1];
 
     structuredText = page.toStructuredText();
-    let data: any;
-    if (structuredText && typeof structuredText.asJSON === "function") {
-      try { data = JSON.parse(structuredText.asJSON()); } catch { return []; }
-    } else {
-      data = structuredText;
-    }
-    if (!data || !data.blocks) return [];
 
     // Normalise raw PDF coords into [0,1] page-relative space
     const normX = (v: number) => (v - bounds[0]) / pageWidth;
@@ -419,15 +507,251 @@ export async function getPageText(
     const normW = (v: number) => v / pageWidth;
     const normH = (v: number) => v / pageHeight;
 
-    // Parse bbox from either array [x1,y1,x2,y2] or object {x,y,w,h} forms
-    const getBbox = (obj: any): { x: number; y: number; w: number; h: number } | null => {
-      if (!obj?.bbox) return null;
-      if (Array.isArray(obj.bbox)) {
-        return { x: obj.bbox[0], y: obj.bbox[1], w: obj.bbox[2] - obj.bbox[0], h: obj.bbox[3] - obj.bbox[1] };
-      }
-      return { x: obj.bbox.x, y: obj.bbox.y, w: obj.bbox.w, h: obj.bbox.h };
+    type ExtractedLine = {
+      text: string;
+      html: string;
+      bb: { x: number; y: number; w: number; h: number };
+      fontSize: number;
+      fontName: string;
+      color: string | null;
+      isBold: boolean;
+      isItalic: boolean;
     };
 
+    type WorkingLine = {
+      bb: { x: number; y: number; w: number; h: number };
+      runs: TextStyleRun[];
+    };
+
+    const pickTop = (counts: Record<string, number>) =>
+      Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
+
+    const buildExtractedLine = (line: WorkingLine | null): ExtractedLine | null => {
+      if (!line) return null;
+
+      const trimmedRuns = trimTrailingWhitespaceFromRuns(line.runs);
+      const text = trimmedRuns.map((run) => run.text).join("");
+      if (!text.trim() || line.bb.w <= 0) return null;
+
+      const fontNameCount: Record<string, number> = {};
+      const fontSizeCount: Record<string, number> = {};
+      const colorCount: Record<string, number> = {};
+      const boldCount: Record<string, number> = { true: 0, false: 0 };
+      const italicCount: Record<string, number> = { true: 0, false: 0 };
+
+      for (const run of trimmedRuns) {
+        const weight = Math.max(1, countCharacters(run.text));
+        const fontName = run.fontName || "Helvetica";
+        const fontSize = run.fontSize ?? 12;
+
+        fontNameCount[fontName] = (fontNameCount[fontName] || 0) + weight;
+        fontSizeCount[String(fontSize)] = (fontSizeCount[String(fontSize)] || 0) + weight;
+        if (run.color) colorCount[run.color] = (colorCount[run.color] || 0) + weight;
+        boldCount[String(!!run.isBold)] += weight;
+        italicCount[String(!!run.isItalic)] += weight;
+      }
+
+      const dominantFontName = pickTop(fontNameCount) || "Helvetica";
+      const dominantFontSize = parseFloat(pickTop(fontSizeCount)) || 12;
+      const dominantColor = pickTop(colorCount) || null;
+      const isBold = (pickTop(boldCount) || "false") === "true";
+      const isItalic = (pickTop(italicCount) || "false") === "true";
+
+      return {
+        text,
+        html: buildRichTextHtml(trimmedRuns, {
+          color: dominantColor,
+          fontSize: dominantFontSize,
+          isBold,
+          isItalic,
+        }),
+        bb: line.bb,
+        fontSize: dominantFontSize,
+        fontName: dominantFontName,
+        color: dominantColor,
+        isBold,
+        isItalic,
+      };
+    };
+
+    const textBlocks: ExtractedLine[][] = [];
+    let currentBlock: ExtractedLine[] | null = null;
+    let currentLine: WorkingLine | null = null;
+
+    structuredText.walk({
+      beginTextBlock: () => {
+        currentBlock = [];
+      },
+      beginLine: (bbox: [number, number, number, number]) => {
+        currentLine = {
+          bb: { x: bbox[0], y: bbox[1], w: bbox[2] - bbox[0], h: bbox[3] - bbox[1] },
+          runs: [],
+        };
+      },
+      onChar: (c: string, _origin: unknown, font: any, size: number, _quad: unknown, color: any) => {
+        if (!currentLine || !c || c === "\r") return;
+
+        const fontName = font?.getName?.() ?? "Helvetica";
+        const runColor = toHexColor(color);
+        const isBold = font?.isBold?.() ?? /bold|black/i.test(fontName);
+        const isItalic = font?.isItalic?.() ?? /italic|oblique/i.test(fontName);
+        const lastRun = currentLine.runs[currentLine.runs.length - 1];
+
+        if (
+          lastRun &&
+          lastRun.color === runColor &&
+          lastRun.fontName === fontName &&
+          Math.abs((lastRun.fontSize ?? size) - size) < 0.05 &&
+          !!lastRun.isBold === isBold &&
+          !!lastRun.isItalic === isItalic
+        ) {
+          lastRun.text += c;
+        } else {
+          currentLine.runs.push({
+            text: c,
+            color: runColor,
+            fontName,
+            fontSize: size,
+            isBold,
+            isItalic,
+          });
+        }
+      },
+      endLine: () => {
+        const extractedLine = buildExtractedLine(currentLine);
+        if (extractedLine) {
+          if (!currentBlock) currentBlock = [];
+          currentBlock.push(extractedLine);
+        }
+        currentLine = null;
+      },
+      endTextBlock: () => {
+        if (currentBlock && currentBlock.length > 0) {
+          textBlocks.push(currentBlock);
+        }
+        currentBlock = null;
+      },
+    });
+
+    const trailingBlock = currentBlock as ExtractedLine[] | null;
+    if (trailingBlock && trailingBlock.length > 0) {
+      textBlocks.push(trailingBlock);
+    }
+
+    const emitLineItem = (line: ExtractedLine): TextItem => {
+      const fontSize = line.fontSize || 12;
+      const tightH = fontSize * 1.45;
+      const verticalCorrection = fontSize * 0.15;
+      const originalCenterY = line.bb.y + (line.bb.h / 2);
+      const tightY = originalCenterY - (tightH / 2) + verticalCorrection;
+
+      return {
+        text: line.text,
+        html: line.html,
+        x: normX(line.bb.x),
+        y: normY(tightY),
+        width: normW(line.bb.w),
+        height: normH(tightH),
+        fontSize,
+        fontName: line.fontName,
+        color: line.color,
+        isBold: line.isBold,
+        isItalic: line.isItalic,
+        lineHeight: 1.15,
+      };
+    };
+
+    if (mode === "line") {
+      return textBlocks.flatMap((block) => block.map(emitLineItem));
+    }
+
+    const extractedTextItems: TextItem[] = [];
+
+    for (const block of textBlocks) {
+      if (block.length === 0) continue;
+
+      const GAP_FACTOR = 0.8;
+      const groups: ExtractedLine[][] = [];
+      let currentGroup: ExtractedLine[] = [block[0]];
+
+      for (let i = 1; i < block.length; i++) {
+        const prev = block[i - 1];
+        const curr = block[i];
+        const prevBottom = prev.bb.y + prev.bb.h;
+        const gap = curr.bb.y - prevBottom;
+        if (gap > prev.fontSize * GAP_FACTOR) {
+          groups.push(currentGroup);
+          currentGroup = [];
+        }
+        currentGroup.push(curr);
+      }
+      groups.push(currentGroup);
+
+      for (const group of groups) {
+        let fullText = "";
+        let fullHtml = "";
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        let firstLineCY: number | null = null;
+        let lastLineCY: number | null = null;
+        const fontNameCount: Record<string, number> = {};
+        const fontSizeCount: Record<string, number> = {};
+        const colorCount: Record<string, number> = {};
+        const boldCount: Record<string, number> = { true: 0, false: 0 };
+        const italicCount: Record<string, number> = { true: 0, false: 0 };
+
+        for (const line of group) {
+          const weight = Math.max(1, countCharacters(line.text));
+          fullText += (fullText ? "\n" : "") + line.text;
+          fullHtml += (fullHtml ? "<br/>" : "") + line.html;
+          minX = Math.min(minX, line.bb.x);
+          minY = Math.min(minY, line.bb.y);
+          maxX = Math.max(maxX, line.bb.x + line.bb.w);
+          maxY = Math.max(maxY, line.bb.y + line.bb.h);
+          const cy = line.bb.y + (line.bb.h / 2);
+          if (firstLineCY === null) firstLineCY = cy;
+          lastLineCY = cy;
+          fontNameCount[line.fontName] = (fontNameCount[line.fontName] || 0) + weight;
+          fontSizeCount[String(line.fontSize)] = (fontSizeCount[String(line.fontSize)] || 0) + weight;
+          if (line.color) colorCount[line.color] = (colorCount[line.color] || 0) + weight;
+          boldCount[String(!!line.isBold)] += weight;
+          italicCount[String(!!line.isItalic)] += weight;
+        }
+
+        if (!fullText.trim() || minX === Infinity) continue;
+
+        const dominantFontName = pickTop(fontNameCount) || "Helvetica";
+        const dominantFontSize = parseFloat(pickTop(fontSizeCount)) || 12;
+        const dominantColor = pickTop(colorCount) || null;
+        const isBold = (pickTop(boldCount) || "false") === "true";
+        const isItalic = (pickTop(italicCount) || "false") === "true";
+
+        let calculatedLineHeight = 1.2;
+        if (dominantFontSize > 0 && group.length > 1 && firstLineCY !== null && lastLineCY !== null) {
+          const avgSpacing = Math.abs(lastLineCY - firstLineCY) / (group.length - 1);
+          calculatedLineHeight = Math.max(1.0, Math.min(3.0, avgSpacing / dominantFontSize));
+        }
+
+        extractedTextItems.push({
+          text: fullText,
+          html: fullHtml,
+          x: normX(minX),
+          y: normY(minY),
+          width: normW(maxX - minX),
+          height: normH(maxY - minY),
+          fontSize: dominantFontSize,
+          fontName: dominantFontName,
+          color: dominantColor,
+          isBold,
+          isItalic,
+          lineHeight: calculatedLineHeight,
+        });
+      }
+    }
+
+    return extractedTextItems;
+
+    const data: any = { blocks: [] };
+    const getBbox = (_obj: any): { x: number; y: number; w: number; h: number } => ({ x: 0, y: 0, w: 0, h: 0 });
     const textItems: TextItem[] = [];
 
     for (const block of data.blocks) {
@@ -472,7 +796,7 @@ export async function getPageText(
         // Collect valid lines with their bboxes first
         interface LineData {
           text: string; bb: { x: number; y: number; w: number; h: number };
-          fontSize: number; fontName: string; color: string | null;
+          fontSize: number; fontName: string; color: string;
         }
         const validLines: LineData[] = [];
         for (const line of block.lines) {
@@ -485,7 +809,7 @@ export async function getPageText(
             bb,
             fontSize: line.font?.size ?? 12,
             fontName: line.font?.name ?? "Helvetica",
-            color: line.color != null ? toHexColor(line.color) : null,
+            color: line.color != null ? (toHexColor(line.color) || "") : "",
           });
         }
         if (validLines.length === 0) continue;
@@ -512,8 +836,8 @@ export async function getPageText(
         for (const grp of groups) {
           let fullText = "";
           let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-          let firstLineCY: number | null = null;
-          let lastLineCY: number | null = null;
+          let firstLineCY = 0;
+          let lastLineCY = 0;
           // Majority vote: count lines per fontName/fontSize/color
           const fontNameCount: Record<string, number> = {};
           const fontSizeCount: Record<string, number> = {};
@@ -618,10 +942,11 @@ export async function renderPageWithMuPDF(
   }
 }
 
-function breakTextIntoLines(text: string, size: number, font: PDFFont, maxWidth: number) {
+function breakTextIntoLines(text: string, size: number, font: PDFFont, maxWidth: number, fontDensity: number = 100) {
   if (!text) return [];
   const paragraphs = text.split('\n');
   const lines: string[] = [];
+  const charSpacing = getCharacterSpacingForDensity(size, fontDensity);
 
   for (const paragraph of paragraphs) {
     const words = paragraph.split(' ');
@@ -630,7 +955,8 @@ function breakTextIntoLines(text: string, size: number, font: PDFFont, maxWidth:
     for (let i = 1; i < words.length; i++) {
       const word = words[i];
       try {
-        const width = font.widthOfTextAtSize(`${currentLine} ${word}`, size);
+        const candidate = `${currentLine} ${word}`;
+        const width = font.widthOfTextAtSize(candidate, size) + (Math.max(0, countCharacters(candidate) - 1) * charSpacing);
         if (width < maxWidth) {
           currentLine += ` ${word}`;
         } else {
@@ -927,12 +1253,12 @@ export async function saveEditedPdf(
   const fontMap = new Map<string, PDFFont>();
   // Embed standard Helvetica as fallback
   const helveticaFont = await newDoc.embedFont(StandardFonts.Helvetica);
-  fontMap.set("Helvetica", helveticaFont);
+  fontMap.set(getFontCacheKey("Helvetica"), helveticaFont);
 
   // Helper to load fonts on demand
   const getFontForAnn = async (fontName?: string, isBold?: boolean, isItalic?: boolean) => {
     const name = fontName || "Helvetica";
-    const cacheKey = `${name}_${isBold ? 'b' : ''}_${isItalic ? 'i' : ''}`;
+    const cacheKey = getFontCacheKey(name, isBold, isItalic);
     if (fontMap.has(cacheKey)) return fontMap.get(cacheKey)!;
 
     let font: PDFFont;
@@ -966,6 +1292,41 @@ export async function saveEditedPdf(
   };
 
   const zapfFont = await newDoc.embedFont(StandardFonts.ZapfDingbats);
+  const drawTextRunWithSpacing = async (
+    page: any,
+    text: string,
+    font: PDFFont,
+    color: any,
+    size: number,
+    x: number,
+    y: number,
+    rotationDegrees: number,
+    opacity: number,
+    charSpacing: number
+  ) => {
+    if (!text) return;
+
+    const pageAny = page as any;
+    page.setFont(font);
+    const fontKey = pageAny.fontKey;
+    const graphicsStateKey = pageAny.maybeEmbedGraphicsState?.({
+      opacity,
+      blendMode: undefined,
+    });
+
+    page.pushOperators(
+      pushGraphicsState(),
+      ...(graphicsStateKey ? [setGraphicsState(graphicsStateKey)] : []),
+      beginText(),
+      setFillingColor(color),
+      setFontAndSize(fontKey, size),
+      setCharacterSpacing(charSpacing),
+      rotateAndSkewTextDegreesAndTranslate(rotationDegrees, 0, 0, x, y),
+      showText(font.encodeText(text)),
+      endText(),
+      popGraphicsState(),
+    );
+  };
   // --- FONT HELPER END ---
 
   for (const ann of annotations) {
@@ -1110,15 +1471,21 @@ export async function saveEditedPdf(
       // B. Draw Text Content
       if (ann.content) {
         const fontSize = ann.size ?? 16;
-        const baseFont = await getFontForAnn(ann.font, false);
-        const boldFont = await getFontForAnn(ann.font, true);
         const localFontMap = new Map<string, PDFFont>();
-        localFontMap.set(ann.font || "Helvetica", baseFont);
-        localFontMap.set(`${ann.font || "Helvetica"}_bold`, boldFont);
+        const ensureRunFont = async (fontName?: string, isBold?: boolean, isItalic?: boolean) => {
+          const resolvedFontName = fontName || ann.font || "Helvetica";
+          const cacheKey = getFontCacheKey(resolvedFontName, isBold, isItalic);
+          if (!localFontMap.has(cacheKey)) {
+            localFontMap.set(cacheKey, await getFontForAnn(resolvedFontName, isBold, isItalic));
+          }
+          return localFontMap.get(cacheKey)!;
+        };
+        const baseFont = await ensureRunFont(ann.font, !!ann.isBold, !!ann.isItalic);
 
         const isHtml = /<[a-z][\s\S]*>/i.test(ann.content) || ann.content.includes("style=");
         let linesOfRuns: TextRun[][] = [];
         const boxWidth = isSideways ? h : w;
+        const fontDensity = ann.fontDensity ?? 100;
 
         if (isHtml) {
           const hasExplicitBoldTags = /<b\b|<strong\b|font-weight:\s*(bold|700|800|900)/i.test(ann.content);
@@ -1127,14 +1494,17 @@ export async function saveEditedPdf(
           const flatRuns = parseRichText(ann.content, {
             color: ann.color || "#000000",
             isBold: effectiveBaseBold,
-            isItalic: false,
+            isItalic: !!ann.isItalic,
             isUnderline: !!ann.isUnderline,
             font: ann.font || "Helvetica",
             size: fontSize
           });
-          linesOfRuns = wrapRichText(flatRuns, boxWidth, localFontMap, ann.font || "Helvetica");
+          for (const run of flatRuns) {
+            await ensureRunFont(run.font, run.isBold, run.isItalic);
+          }
+          linesOfRuns = wrapRichText(flatRuns, boxWidth, localFontMap, ann.font || "Helvetica", fontDensity);
         } else {
-          const plainLines = breakTextIntoLines(ann.content, fontSize, baseFont, boxWidth);
+          const plainLines = breakTextIntoLines(ann.content, fontSize, baseFont, boxWidth, fontDensity);
           linesOfRuns = plainLines.map(txt => [{
             text: txt, isBold: !!ann.isBold, color: ann.color || "#000000", font: ann.font || "Helvetica", size: fontSize, isItalic: !!ann.isItalic, isUnderline: !!ann.isUnderline
           }]);
@@ -1198,25 +1568,31 @@ export async function saveEditedPdf(
             }
 
             // Standard Text Rendering
-            const runWidth = getRunWidth(run, localFontMap, ann.font || "Helvetica");
+            const runWidth = getRunWidth(run, localFontMap, ann.font || "Helvetica", fontDensity);
             const rotatedX = currentLineXOffset * cos - yOffset * sin;
             const rotatedY = currentLineXOffset * sin + yOffset * cos;
             const finalX = centerX + rotatedX;
             const finalY = centerY + rotatedY;
 
-            let renderFontName = ann.font || "Helvetica";
-            const runFont = await getFontForAnn(renderFontName, run.isBold, run.isItalic);
+            const renderFontName = run.font || ann.font || "Helvetica";
+            const runFont =
+              localFontMap.get(getFontCacheKey(renderFontName, run.isBold, run.isItalic)) ||
+              await ensureRunFont(renderFontName, run.isBold, run.isItalic);
             const runColor = safeHexToRgb01(run.color);
+            const charSpacing = getCharacterSpacingForDensity(run.size, fontDensity);
 
-            page.drawText(run.text, {
-              x: finalX,
-              y: finalY,
-              size: run.size,
-              font: runFont,
-              color: runColor,
-              opacity: op,
-              rotate: degrees(netRotation)
-            });
+            await drawTextRunWithSpacing(
+              page,
+              run.text,
+              runFont,
+              runColor,
+              run.size,
+              finalX,
+              finalY,
+              netRotation,
+              op,
+              charSpacing
+            );
 
             // Underline Logic
             if (run.isUnderline) {
