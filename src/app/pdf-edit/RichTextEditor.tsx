@@ -7,6 +7,7 @@ interface RichTextEditorProps {
   className?: string;
   autoFocus?: boolean;
   sanitizeHtml?: (html: string) => string;
+  onMeasure?: (metrics: { contentHeight: number; contentWidth: number }) => void;
 }
 
 export const RichTextEditor = ({
@@ -16,6 +17,7 @@ export const RichTextEditor = ({
   className,
   autoFocus = false,
   sanitizeHtml,
+  onMeasure,
 }: RichTextEditorProps) => {
   const contentEditableRef = useRef<HTMLDivElement>(null);
   const normalizeHtml = useCallback(
@@ -55,6 +57,36 @@ export const RichTextEditor = ({
     onChange(normalizeHtml(html));
   };
 
+  const measureContent = useCallback(() => {
+    if (!contentEditableRef.current || !onMeasure) return;
+
+    const el = contentEditableRef.current;
+    const prevHeight = el.style.height;
+    const prevMinHeight = el.style.minHeight;
+    const prevOverflowY = el.style.overflowY;
+
+    el.style.height = "auto";
+    el.style.minHeight = "0";
+    el.style.overflowY = "hidden";
+
+    const contentHeight = el.scrollHeight;
+    const contentWidth = el.scrollWidth;
+
+    el.style.height = prevHeight;
+    el.style.minHeight = prevMinHeight;
+    el.style.overflowY = prevOverflowY;
+
+    onMeasure({ contentHeight, contentWidth });
+  }, [onMeasure]);
+
+  useEffect(() => {
+    if (!onMeasure) return;
+    const raf = requestAnimationFrame(() => {
+      measureContent();
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [htmlContent, measureContent, onMeasure, style.fontSize, style.lineHeight, style.letterSpacing, style.whiteSpace, style.wordBreak]);
+
   return (
     <div
       ref={contentEditableRef}
@@ -63,7 +95,12 @@ export const RichTextEditor = ({
       contentEditable
       suppressContentEditableWarning
       spellCheck={false}
-      onInput={(e) => emitChange(e.currentTarget.innerHTML)}
+      onInput={(e) => {
+        emitChange(e.currentTarget.innerHTML);
+        requestAnimationFrame(() => {
+          measureContent();
+        });
+      }}
       onBlur={(e) => {
         const cleanHtml = normalizeHtml(e.currentTarget.innerHTML);
         if (e.currentTarget.innerHTML !== cleanHtml) {

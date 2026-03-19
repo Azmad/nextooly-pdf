@@ -1110,7 +1110,7 @@ export async function saveEditedPdf(
   // --------------------------------------------------------------------------
   if (redact) {
     const redactions = annotations
-      .filter((ann) => ann.type === "redact" || (ann.type === "text_edit" && ann.originalBounds))
+      .filter((ann) => (ann.type === "redact" && !ann.groupId) || (ann.type === "text_edit" && ann.originalBounds))
       .map((ann) => {
         const originalPageIndex = pageOrder[ann.pageIndex];
         const r = ann.type === "text_edit" && ann.originalBounds
@@ -1655,7 +1655,8 @@ export async function saveEditedPdf(
 
         // Inflate ALL OPAQUE filled boxes to avoid hairlines
         const isOpaque = op >= 0.99;
-        if (isOpaque) {
+        const shouldInflate = isOpaque && !ann.groupId;
+        if (shouldInflate) {
           const INFLATION = 0.5;
           rectOpts.x -= INFLATION;
           rectOpts.y -= INFLATION;

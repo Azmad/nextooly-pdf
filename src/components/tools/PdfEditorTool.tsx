@@ -113,6 +113,88 @@ const moveAnnotationToFront = (annotations: Annotation[], annotationId: string) 
   return nextAnnotations;
 };
 
+const getHorizontalOverlap = (a: Pick<TextItem, "x" | "width">, b: Pick<TextItem, "x" | "width">) =>
+  Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x));
+
+const hasMeaningfulHorizontalOverlap = (a: Pick<TextItem, "x" | "width">, b: Pick<TextItem, "x" | "width">) => {
+  const overlap = getHorizontalOverlap(a, b);
+  const minWidth = Math.max(0.0001, Math.min(a.width, b.width));
+  const centerA = a.x + (a.width / 2);
+  const centerB = b.x + (b.width / 2);
+
+  return (
+    overlap / minWidth >= 0.2 ||
+    (centerA >= b.x && centerA <= b.x + b.width) ||
+    (centerB >= a.x && centerB <= a.x + a.width)
+  );
+};
+
+const clampTextBlockToEditingLane = (block: TextItem, blocks: TextItem[]) => {
+  const blockTop = block.y;
+  const blockBottom = block.y + block.height;
+  const blockCenterY = blockTop + (block.height / 2);
+  let nearestAbove: TextItem | null = null;
+  let nearestBelow: TextItem | null = null;
+  let nearestAboveBottom = -Infinity;
+  let nearestBelowTop = Infinity;
+
+  for (const candidate of blocks) {
+    if (
+      candidate === block ||
+      (candidate.text === block.text &&
+        candidate.x === block.x &&
+        candidate.y === block.y &&
+        candidate.width === block.width &&
+        candidate.height === block.height)
+    ) {
+      continue;
+    }
+
+    if (!hasMeaningfulHorizontalOverlap(block, candidate)) continue;
+
+    const candidateTop = candidate.y;
+    const candidateBottom = candidate.y + candidate.height;
+
+    if (candidateBottom <= blockCenterY) {
+      if (!nearestAbove || candidateBottom > nearestAboveBottom) {
+        nearestAbove = candidate;
+        nearestAboveBottom = candidateBottom;
+      }
+    } else if (candidateTop >= blockCenterY) {
+      if (!nearestBelow || candidateTop < nearestBelowTop) {
+        nearestBelow = candidate;
+        nearestBelowTop = candidateTop;
+      }
+    }
+  }
+
+  const topLimit = nearestAbove ? Math.max(0, (nearestAboveBottom + blockTop) / 2) : 0;
+  const bottomLimit = nearestBelow ? Math.min(1, (nearestBelowTop + blockBottom) / 2) : 1;
+
+  let constrainedTop = Math.max(blockTop, topLimit);
+  let constrainedBottom = Math.min(blockBottom, bottomLimit);
+
+  if ((constrainedBottom - constrainedTop) < 0.002) {
+    const fallbackHalfHeight = Math.max(0.001, Math.min(block.height * 0.25, 0.01));
+    constrainedTop = Math.max(0, blockCenterY - fallbackHalfHeight);
+    constrainedBottom = Math.min(1, blockCenterY + fallbackHalfHeight);
+  }
+
+  if ((constrainedBottom - constrainedTop) < 0.002) {
+    constrainedBottom = Math.min(1, constrainedTop + 0.002);
+  }
+
+  return {
+    topLimit,
+    bottomLimit,
+    block: {
+      ...block,
+      y: constrainedTop,
+      height: Math.max(0.002, constrainedBottom - constrainedTop),
+    },
+  };
+};
+
 /** ---------------- Component ---------------- */
 export default function PdfEditorTool() {
   const [state, setState] = useState<EditorState & { pdfFormFields: PdfFormField[] }>({
@@ -711,14 +793,22 @@ export default function PdfEditorTool() {
     const groupId = `group-${id}`;
     const isSingleLineEdit = textSelectMode === "line";
 
-    const { bg, palette: scannedPalette, bgPalette, inkBounds } = detectColors(block, canvasRef.current);
-    const patchSource = inkBounds || block;
+    const laneBounds = clampTextBlockToEditingLane(block, state.extractedBlocks);
+    const laneBlock = laneBounds.block;
+    const { bg, palette: scannedPalette, bgPalette, inkBounds } = detectColors(laneBlock, canvasRef.current);
+    const patchSource = inkBounds || laneBlock;
     const maxTrimX = block.width * 0.04;
-    const maxTrimY = block.height * 0.12;
-    const safeLeft = Math.min(patchSource.x, block.x + maxTrimX);
-    const safeRight = Math.max(patchSource.x + patchSource.width, (block.x + block.width) - maxTrimX);
-    const safeTop = Math.min(patchSource.y, block.y + maxTrimY);
-    const safeBottom = Math.max(patchSource.y + patchSource.height, (block.y + block.height) - maxTrimY);
+    const maxTrimY = laneBlock.height * 0.12;
+    const safeLeft = Math.min(patchSource.x, laneBlock.x + maxTrimX);
+    const safeRight = Math.max(patchSource.x + patchSource.width, (laneBlock.x + laneBlock.width) - maxTrimX);
+    let safeTop = Math.min(patchSource.y, laneBlock.y + maxTrimY);
+    let safeBottom = Math.max(patchSource.y + patchSource.height, (laneBlock.y + laneBlock.height) - maxTrimY);
+    safeTop = Math.max(laneBounds.topLimit, safeTop);
+    safeBottom = Math.min(laneBounds.bottomLimit, safeBottom);
+    if ((safeBottom - safeTop) < 0.002) {
+      safeTop = laneBlock.y;
+      safeBottom = laneBlock.y + laneBlock.height;
+    }
     const safeWidth = Math.max(0.002, safeRight - safeLeft);
     const safeHeight = Math.max(0.002, safeBottom - safeTop);
     const patchBleedX = (Math.min(2, Math.max(1, block.fontSize * state.scale * 0.05))) /
@@ -726,23 +816,21 @@ export default function PdfEditorTool() {
     const patchBleedY = (Math.min(2, Math.max(1, block.fontSize * state.scale * 0.08))) /
       Math.max(state.pageSize.height || 1, 1);
     const patchLeft = Math.max(0, safeLeft - patchBleedX);
-    const patchTop = Math.max(0, safeTop - patchBleedY);
+    const patchTop = Math.max(laneBounds.topLimit, Math.max(0, safeTop - patchBleedY));
     const patchWidth = Math.min(1 - patchLeft, safeWidth + (patchBleedX * 2));
-    const patchHeight = Math.min(1 - patchTop, safeHeight + (patchBleedY * 2));
-    const editorTop = block.y;
-    const editorBottom = Math.max(block.y + block.height, safeBottom);
+    const patchBottom = Math.min(laneBounds.bottomLimit, Math.min(1, safeBottom + patchBleedY));
+    const patchHeight = Math.max(0.002, patchBottom - patchTop);
+    const editorTop = Math.max(laneBounds.topLimit, Math.max(0, safeTop - (patchBleedY * 0.35)));
     const lineCount = Math.max(1, block.text.split("\n").length);
     const estimatedTextHeight =
       (((block.fontSize || 12) * state.scale) * (block.lineHeight ?? 1.15) * lineCount +
         ((block.fontSize || 12) * state.scale * 0.35)) /
       Math.max(state.pageSize.height || 1, 1);
-    const editorHeight = isSingleLineEdit
-      ? Math.max(block.height, estimatedTextHeight)
-      : Math.max(
-          block.height,
-          estimatedTextHeight,
-          (editorBottom - editorTop) + (block.height * 0.18)
-        );
+    const maxEditorHeight = Math.max(0.002, laneBounds.bottomLimit - editorTop);
+    const editorHeight = Math.min(maxEditorHeight, Math.max(
+      safeHeight + (patchBleedY * 0.7),
+      estimatedTextHeight
+    ));
     const singleLineWidthPadding = Math.max(block.width * 0.06, 0.01);
     const editorWidth = isSingleLineEdit
       ? Math.min(1 - block.x, block.width + singleLineWidthPadding)
@@ -2469,6 +2557,38 @@ export default function PdfEditorTool() {
                                       a.id === ann.id ? { ...a, content: cleanHtml } : a
                                     )
                                   }));
+                                }}
+                                onMeasure={({ contentHeight }) => {
+                                  const pageHeight = containerRef.current?.getBoundingClientRect().height || state.pageSize.height || 1;
+                                  let nextHeight = Math.max(0.002, (contentHeight + 2) / pageHeight);
+                                  const epsilon = 2 / pageHeight;
+
+                                  setState(s => {
+                                    const currentAnnotation = s.annotations.find(a => a.id === ann.id);
+                                    if (!currentAnnotation) return s;
+
+                                    const partnerPatch = currentAnnotation.groupId
+                                      ? s.annotations.find(a => a.type === "redact" && a.groupId === currentAnnotation.groupId)
+                                      : null;
+
+                                    if (partnerPatch?.height) {
+                                      const maxPatchHeight = (partnerPatch.y + partnerPatch.height) - currentAnnotation.y;
+                                      if (maxPatchHeight > 0.002) {
+                                        nextHeight = Math.min(nextHeight, maxPatchHeight);
+                                      }
+                                    }
+
+                                    if (Math.abs((currentAnnotation.height || 0) - nextHeight) < epsilon) {
+                                      return s;
+                                    }
+
+                                    return {
+                                      ...s,
+                                      annotations: s.annotations.map(a =>
+                                        a.id === ann.id ? { ...a, height: nextHeight } : a
+                                      )
+                                    };
+                                  });
                                 }}
                                 autoFocus={isSel}
                                 sanitizeHtml={sanitizeHtml}
