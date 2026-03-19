@@ -15,6 +15,17 @@
 .tool-container ::-webkit-scrollbar-thumb  { background: #94a3b8; border-radius: 10px; border: 2px solid transparent; background-clip: content-box; }
 .tool-container ::-webkit-scrollbar-thumb:hover { background: #64748b; }
 
+.text-edit-overlay-editor {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.text-edit-overlay-editor::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
 /* Suppress page-shell chrome only on the editor page */
 .pdf-editor-active-page h1,
 .pdf-editor-active-page p.text-muted-foreground {

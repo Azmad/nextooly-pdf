@@ -1329,7 +1329,16 @@ export async function saveEditedPdf(
   };
   // --- FONT HELPER END ---
 
-  for (const ann of annotations) {
+  const orderedAnnotations = annotations
+    .map((ann, index) => ({ ann, index }))
+    .sort((a, b) => {
+      const layerA = a.ann.type === "redact" && a.ann.groupId ? 0 : 1;
+      const layerB = b.ann.type === "redact" && b.ann.groupId ? 0 : 1;
+      return layerA - layerB || a.index - b.index;
+    })
+    .map(({ ann }) => ann);
+
+  for (const ann of orderedAnnotations) {
     const page = pageMap.get(ann.pageIndex);
     if (!page) continue;
 

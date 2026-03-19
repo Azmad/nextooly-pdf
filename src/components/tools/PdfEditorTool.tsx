@@ -92,6 +92,26 @@ const createNewAnnotation = (
 };
 
 const getFontDensityLetterSpacingEm = (fontDensity: number = 100) => (100 - fontDensity) / 500;
+const isEditBackgroundPatch = (ann: Annotation) => ann.type === "redact" && !!ann.groupId;
+const sortAnnotationsByLayer = (annotations: Annotation[]) =>
+  annotations
+    .map((ann, index) => ({ ann, index }))
+    .sort((a, b) => {
+      const layerA = isEditBackgroundPatch(a.ann) ? 0 : 1;
+      const layerB = isEditBackgroundPatch(b.ann) ? 0 : 1;
+      return layerA - layerB || a.index - b.index;
+    })
+    .map(({ ann }) => ann);
+
+const moveAnnotationToFront = (annotations: Annotation[], annotationId: string) => {
+  const targetIndex = annotations.findIndex((ann) => ann.id === annotationId);
+  if (targetIndex < 0 || targetIndex === annotations.length - 1) return annotations;
+
+  const nextAnnotations = [...annotations];
+  const [targetAnnotation] = nextAnnotations.splice(targetIndex, 1);
+  nextAnnotations.push(targetAnnotation);
+  return nextAnnotations;
+};
 
 /** ---------------- Component ---------------- */
 export default function PdfEditorTool() {
@@ -889,6 +909,7 @@ export default function PdfEditorTool() {
   const handleWindowMouseMove = useCallback((e: MouseEvent) => {
     if (dragMode.current && dragStart.current) {
       e.preventDefault();
+      const isFirstMove = !hasMoved.current;
       hasMoved.current = true;
       const { x, y } = getRelCoords(e);
       const ds = dragStart.current;
@@ -897,10 +918,14 @@ export default function PdfEditorTool() {
       const activeId = ds.id;
 
       setState(prev => {
+        const orderedAnnotations = isFirstMove
+          ? moveAnnotationToFront(prev.annotations, activeId)
+          : prev.annotations;
+
         // Optimization: We removed the .find() call here entirely
         return {
           ...prev,
-          annotations: prev.annotations.map(a => {
+          annotations: orderedAnnotations.map(a => {
             const isMatch = a.id === activeId;
             const isGroupMatch = ds.groupId && a.groupId === ds.groupId;
 
@@ -2298,8 +2323,7 @@ export default function PdfEditorTool() {
                       />
                     )}
                     {/* Annotations Overlay */}
-                    {state.annotations.map(ann => {
-                      if (ann.pageIndex !== state.currentPage) return null;
+                    {sortAnnotationsByLayer(state.annotations.filter(ann => ann.pageIndex === state.currentPage)).map(ann => {
                       const isSel = ann.id === state.selectedId;
                       const isPathLike = ann.type === "path" || ann.type === "arrow";
 
@@ -2436,7 +2460,7 @@ export default function PdfEditorTool() {
                             >
                               <RichTextEditor
                                 htmlContent={ann.content || ""}
-                                className={getFontClass(ann.font)}
+                                className={`${getFontClass(ann.font)} text-edit-overlay-editor`}
                                 onChange={(newHtml) => {
                                   const cleanHtml = sanitizeHtml(newHtml);
                                   setState(s => ({
@@ -2525,15 +2549,16 @@ export default function PdfEditorTool() {
                       }
 
                       const isMark = ann.type === "text" && (ann.content === "✓" || ann.content === "✕");
+                      const isEditPatch = isEditBackgroundPatch(ann);
                       const style: React.CSSProperties = {
                         position: "absolute",
                         left: isPathLike ? 0 : `${ann.x * 100}%`,
                         top: isPathLike ? 0 : `${ann.y * 100}%`,
                         width: isPathLike ? "100%" : `${(ann.width || 0) * 100}%`,
                         height: isPathLike ? "100%" : `${(ann.height || 0) * 100}%`,
-                        zIndex: isSel ? 100 : 10,
+                        zIndex: isSel ? 100 : (isEditPatch ? 1 : 10),
                         transform: ann.rotation ? `rotate(${ann.rotation}deg)` : "none",
-                        pointerEvents: (ann.type === "redact" && ann.groupId) ? "none" : "auto",
+                        pointerEvents: isEditPatch ? "none" : "auto",
                         // CHANGE A: Force "move" cursor for Marks so user knows they can drag it
                         cursor: isMark ? "move" : "default"
                       };
